@@ -1,0 +1,26 @@
+# FUNDAMENTALS OF COMPUTATIONAL NUTRITION & PHYSIOLOGY
+NutriBodySim Reference Manual — Module 01: Anthropometry & Bioenergetics
+
+CHAPTER 1: MATHEMATICAL SPECIFICATION OF BIOLOGICAL SCALING
+Section 1.1: The Dimensional Foundation of Human Stature
+Biological scaling models express physiological rates as power functions of organismal dimensions. In human nutritional assessment, standard mass-to-height indices have historically modeled body volume as a cylinder or geometric prism. 
+
+The Quetelet index, subsequently termed the Body Mass Index (BMI), was originally formulated to describe population-level mass accumulation relative to stature squared:
+Ratio = Mass (kg) / [Height (m)]^2
+
+Section 1.2: Limitations of Exponent Invariance
+While an exponent of 2.0 provides geometric simplicity, allometric analyses across diverse cohorts demonstrate that the true empirical scaling exponent fluctuates between 1.8 and 2.4 depending on age, sex, and skeletal morphology. For this reason, computational systems must parameterize the power exponent rather than hardcoding static constants.
+
+CHAPTER 2: BASAL & RESTING METABOLIC RATE FORMULATIONS
+Section 2.1: The Multi-Component Energy Partition
+Energy expenditure is partitioned into resting metabolic rate (RMR), the thermic effect of food (TEF), and physical activity energy expenditure (PAEE). Computational models must treat RMR as a parameter-driven baseline onto which demographic and body-composition coefficients are applied:
+RMR = Baseline + (c1 * Weight) + (c2 * Height) - (c3 * Age)
+
+Section 2.2: Unit Normalization Rules
+Under international scientific standards (SI), mass must normalize to kilograms (kg), stature to meters (m) or centimeters (cm), and energy to kilojoules (kJ) or kilocalories (kcal). Every computation must log unit conversion factors with full audit provenance.
+
+CHAPTER 3: DATA VALIDATION & OUTLIER TAXONOMY
+In clinical nutrition datasets, input errors (such as heights recorded in centimeters treated as meters, or imperial pound measurements unflagged) introduce massive bias. Automated data pipelines must evaluate:
+1. Missingness percentage
+2. Outlier thresholds (3 standard deviations or IQR beyond fences)
+3. Dimensional coherence

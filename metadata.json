@@ -1,0 +1,8 @@
+{
+  "name": "Remix Remix NutriBodySim",
+  "description": "Platform laboratorium riset komputasi nutrisi dan pemodelan fisiologi dengan mesin deterministik AST, pohon kehidupan 3D interaktif, dan pencarian jurnal ilmiah.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

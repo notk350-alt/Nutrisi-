@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NutriBodySim — Laboratorium Riset Komputasi Nutrisi & Fisiologi</title>
+    <meta name="description" content="Platform laboratorium riset komputasi nutrisi dan pemodelan fisiologi dengan mesin deterministik AST, pohon kehidupan 3D interaktif, dan pencarian jurnal ilmiah." />
+    <meta property="og:title" content="NutriBodySim — Laboratorium Riset Komputasi Nutrisi & Fisiologi" />
+    <meta property="og:description" content="Platform laboratorium riset komputasi nutrisi dan pemodelan fisiologi dengan mesin deterministik AST, pohon kehidupan 3D interaktif, dan pencarian jurnal ilmiah." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      // Filter out non-application browser extension errors (e.g. MetaMask, Web3 wallet inpage injection inside iframes)
+      (function() {
+        function isExtensionError(msg) {
+          if (!msg || typeof msg !== 'string') return false;
+          var lower = msg.toLowerCase();
+          return (
+            lower.includes('metamask') ||
+            lower.includes('failed to connect to metamask') ||
+            lower.includes('ethereum') ||
+            lower.includes('web3') ||
+            lower.includes('wallet') ||
+            lower.includes('chrome-extension://') ||
+            lower.includes('moz-extension://') ||
+            lower.includes('evmprovider')
+          );
+        }
+
+        window.addEventListener('unhandledrejection', function(event) {
+          var reason = event.reason;
+          var message = '';
+          if (typeof reason === 'string') {
+            message = reason;
+          } else if (reason && typeof reason.message === 'string') {
+            message = reason.message;
+          }
+          if (isExtensionError(message)) {
+            event.preventDefault();
+            if (typeof event.stopImmediatePropagation === 'function') {
+              event.stopImmediatePropagation();
+            }
+          }
+        }, true);
+
+        window.addEventListener('error', function(event) {
+          var message = event.message || (event.error && event.error.message) || '';
+          if (isExtensionError(message)) {
+            event.preventDefault();
+            if (typeof event.stopImmediatePropagation === 'function') {
+              event.stopImmediatePropagation();
+            }
+          }
+        }, true);
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
