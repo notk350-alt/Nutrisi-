@@ -25,11 +25,14 @@ import {
   timestamp,
   jsonb,
   unique,
-  index
+  index,
+  check
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import { users } from './identity';
 import { projects } from './collaboration';
 import { scientificModels } from './scientific';
+import type { NotebookCellType } from '../types';
 import type {
   DatasetColumnMeta,
   DatasetValidationReport
@@ -96,6 +99,10 @@ export const datasetVersions = pgTable(
   },
   (table) => [
     unique('uq_dataset_versions_dataset_tag').on(table.datasetId, table.versionTag),
+    check(
+      'dataset_versions_state_check',
+      sql`${table.state} IN ('RAW', 'WORKING_COPY', 'CLEANED', 'VALIDATED', 'ANALYSIS_READY')`
+    ),
     index('idx_dataset_versions_dataset').on(table.datasetId),
     index('idx_dataset_versions_state').on(table.state)
   ]
@@ -127,6 +134,10 @@ export const statisticsAnalyses = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
   },
   (table) => [
+    check(
+      'statistics_analyses_analysis_type_check',
+      sql`${table.analysisType} IN ('DESCRIPTIVE', 'TWO_GROUP_COMPARISON', 'MULTIPLE_GROUP_ANOVA', 'CORRELATION', 'LINEAR_REGRESSION', 'DIAGNOSTICS')`
+    ),
     index('idx_statistics_analyses_project').on(table.projectId),
     index('idx_statistics_analyses_dataset_ver').on(table.datasetVersionId)
   ]
@@ -163,7 +174,11 @@ export const charts = pgTable(
   },
   (table) => [
     index('idx_charts_project').on(table.projectId),
-    index('idx_charts_analysis').on(table.analysisId)
+    index('idx_charts_analysis').on(table.analysisId),
+    check(
+      'charts_chart_type_check',
+      sql`${table.chartType} IN ('LINE', 'BAR', 'HISTOGRAM', 'SCATTER', 'BOX_PLOT')`
+    )
   ]
 );
 
@@ -200,14 +215,20 @@ export const notebookCells = pgTable(
     notebookId: varchar('notebook_id', { length: 64 })
       .notNull()
       .references(() => notebooks.id, { onDelete: 'cascade' }),
-    cellType: varchar('cell_type', { length: 32 }).notNull(), // 'TEXT' | 'CODE' | 'ANALYSIS_ATTACHMENT' | 'CHART_ATTACHMENT'
+    cellType: varchar('cell_type', { length: 32 }).$type<NotebookCellType>().notNull(),
     orderIndex: integer('order_index').notNull(),
     title: varchar('title', { length: 255 }),
-    content: text('content').notNull()
+    content: text('content').notNull(),
+    metadata: jsonb('metadata').$type<Record<string, unknown> | null>()
   },
   (table) => [
     unique('uq_notebook_cells_order').on(table.notebookId, table.orderIndex),
-    index('idx_notebook_cells_notebook').on(table.notebookId)
+    index('idx_notebook_cells_notebook').on(table.notebookId),
+    check(
+      'notebook_cells_cell_type_check',
+      sql`${table.cellType} IN ('TEXT', 'DATA', 'FORMULA', 'CODE', 'CHART', 'TABLE', 'EXPERIMENT', 'REFERENCE')`
+    ),
+    check('notebook_cells_order_index_check', sql`${table.orderIndex} >= 0`)
   ]
 );
 
@@ -234,7 +255,12 @@ export const codeExecutions = pgTable(
   },
   (table) => [
     index('idx_code_executions_project').on(table.projectId),
-    index('idx_code_executions_user').on(table.executedBy)
+    index('idx_code_executions_user').on(table.executedBy),
+    check(
+      'code_executions_language_check',
+      sql`${table.language} IN ('PYTHON', 'R', 'SQL', 'JAVASCRIPT')`
+    ),
+    check('code_executions_execution_time_ms_check', sql`${table.executionTimeMs} >= 0`)
   ]
 );
 
@@ -270,6 +296,10 @@ export const experiments = pgTable(
   },
   (table) => [
     index('idx_experiments_project').on(table.projectId),
-    index('idx_experiments_baseline_model').on(table.baselineModelId)
+    index('idx_experiments_baseline_model').on(table.baselineModelId),
+    check(
+      'experiments_status_check',
+      sql`${table.status} IN ('DRAFT', 'RUNNING', 'COMPLETED', 'FAILED')`
+    )
   ]
 );

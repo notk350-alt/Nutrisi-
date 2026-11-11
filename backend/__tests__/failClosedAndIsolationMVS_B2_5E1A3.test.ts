@@ -177,6 +177,20 @@ describe('MVS-B2.5E.1A.3: Test Isolation & Fail-Closed Database Protection', () 
       }).toThrow(DatabaseInitializationError);
     });
 
+    it.each([
+      ['missing', (state: Record<string, unknown>) => { delete state.users; }],
+      ['wrong type', (state: Record<string, unknown>) => { state.users = {}; }]
+    ])('2.3 Rejects a %s collection without modifying the persistent file', (_description, corruptCollection) => {
+      const invalidDbPath = path.join(TEST_SANDBOX_DIR, 'invalid_collection_db.json');
+      const state = JSON.parse(fs.readFileSync(BACKUP_DB, 'utf-8')) as Record<string, unknown>;
+      corruptCollection(state);
+      const invalidContent = JSON.stringify(state);
+      fs.writeFileSync(invalidDbPath, invalidContent, 'utf-8');
+
+      expect(() => new DatabaseStore(invalidDbPath)).toThrow(DatabaseInitializationError);
+      expect(fs.readFileSync(invalidDbPath, 'utf-8')).toBe(invalidContent);
+    });
+
     it('2.3 Valid JSON database loads successfully without throwing and preserves all data', () => {
       const validDbPath = path.join(TEST_SANDBOX_DIR, 'valid_db.json');
       fs.copyFileSync(BACKUP_DB, validDbPath);
@@ -188,7 +202,19 @@ describe('MVS-B2.5E.1A.3: Test Isolation & Fail-Closed Database Protection', () 
       expect(state.formulas.length).toBe(5);
     });
 
-    it('2.4 Non-existent database triggers legitimate bootstrap creation without error', () => {
+    it('2.4 Email lookup safely skips users with invalid email values and rejects invalid queries', () => {
+      const validDbPath = path.join(TEST_SANDBOX_DIR, 'email_lookup_db.json');
+      fs.copyFileSync(BACKUP_DB, validDbPath);
+      const store = new DatabaseStore(validDbPath);
+      const malformedUser = { ...store.getState().users[0], id: 'usr_invalid_email', email: 'placeholder@example.org' };
+      Object.defineProperty(malformedUser, 'email', { value: null });
+      store.getState().users.unshift(malformedUser);
+
+      expect(store.getUserByEmail('admin@nutribodysim.org')?.id).toBe('usr_admin');
+      expect(store.getUserByEmail(null as unknown as string)).toBeUndefined();
+    });
+
+    it('2.5 Non-existent database triggers legitimate bootstrap creation without error', () => {
       const newDbPath = path.join(TEST_SANDBOX_DIR, 'new_bootstrap_db.json');
       expect(fs.existsSync(newDbPath)).toBe(false);
 

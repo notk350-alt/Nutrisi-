@@ -22,7 +22,7 @@ import {
   ExchangeDependencies,
   OIDCExchangeErrorCode
 } from './types';
-import { defaultOIDCTransactionStore } from './transactionStore';
+import { getRuntimeOIDCTransactionStore } from './runtimeTransactionStore';
 import { defaultGoogleJWKSClient } from './jwks';
 import { verifyGoogleIDToken } from './verifier';
 import { getOIDCConfig } from './config';
@@ -113,8 +113,8 @@ export async function exchangeGoogleAuthorizationCode(
   }
 
   // 3. Atomic Transaction Consumption (Single-Use Enforcement)
-  const store = dependencies?.transactionStore ?? defaultOIDCTransactionStore;
-  const consumeResult = store.consumeTransaction({
+  const store = dependencies?.transactionStore ?? getRuntimeOIDCTransactionStore();
+  const consumeResult = await store.consumeTransaction({
     state,
     transactionId,
     clientBinding,

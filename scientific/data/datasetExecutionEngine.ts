@@ -47,7 +47,7 @@ import { ValidationProfileStore } from './dataValidation';
 import { DatasetExecutionRequestValidator, ResultSetValidator } from './datasetExecutionRequest';
 import { DatasetInputAssembler } from './datasetInputAssembler';
 import { DatasetValidationGate } from './datasetValidationGate';
-import crypto from 'crypto';
+import { secureRandomHex } from '../crypto';
 
 export interface ExecuteDatasetOptions {
   request: DatasetExecutionRequest;
@@ -105,7 +105,7 @@ export class DatasetExecutionEngine {
 
     const createdAt = custom_timestamp || request.created_at || new Date().toISOString();
     const resultSetId =
-      request.request_id ? `drs_${request.request_id}` : `drs_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      request.request_id ? `drs_${request.request_id}` : `drs_${Date.now()}_${secureRandomHex(4)}`;
 
     // 1. Validate request structure
     DatasetExecutionRequestValidator.assertValid(request);

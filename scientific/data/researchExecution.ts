@@ -13,7 +13,7 @@
  * - Zero eval, zero dynamic code execution
  */
 
-import * as crypto from 'crypto';
+import { sha256Hex } from '../crypto';
 import {
   createResearchProject,
   DeviationType,
@@ -223,10 +223,7 @@ export class ResearchExecutionEngine {
       warnings: options.warnings ? [...options.warnings].sort() : []
     };
 
-    const execProvenanceHash = crypto
-      .createHash('sha256')
-      .update(canonicalizeJson(execProvenancePayload))
-      .digest('hex');
+    const execProvenanceHash = sha256Hex(canonicalizeJson(execProvenancePayload));
 
     const executionRecord: ProjectExecutionRecord = deepFreeze({
       execution_id: options.execution_id,

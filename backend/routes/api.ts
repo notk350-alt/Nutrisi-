@@ -8,14 +8,18 @@
  * /provenance, /audit
  */
 
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import multer from 'multer';
-import { db } from '../database/store';
-import { defaultSessionStore } from '../auth/sessionStore';
+import { getRuntimeRepositories, getRuntimeSelection } from '../database/runtime';
+import { canAccessProjectWithRepositories, canAccessMaterialWithRepositories } from '../auth/objectAuth';
+import { RoleApprovalEngine } from '../auth/roleApprovalEngine';
 import { getAuthConfig } from '../auth/authConfig';
+import { getOIDCConfig, validateOIDCConfig } from '../auth/oidc/config';
+import { handleGoogleCallback, initiateGoogleLogin } from '../auth/oidc/orchestrator';
+import { provisionVerifiedGoogleIdentity } from '../auth/oidc/provisioner';
 import { 
   createAuthMiddleware, 
   extractToken,
@@ -24,42 +28,20 @@ import {
   requireRole,
   requireAdmin,
   hasPermission,
-  authorizeProject,
-  authorizeDataset,
-  authorizeNotebook,
-  authorizeNotebookCell,
-  authorizeMaterial,
-  authorizeExperiment,
-  authorizeTeam,
-  authorizeNote,
-  authorizeRoleRequest,
-  canAccessRoleRequest,
-  canAccessProject,
-  canAccessDataset,
-  canAccessNotebook,
-  canAccessNotebookCell,
-  canAccessMaterial,
-  canAccessExperiment,
-  canAccessTeam,
-  canAccessNote
 } from '../auth/authMiddleware';
 import {
   validateRequestedRole,
   checkRoleEligibility,
-  sanitizeTextField,
-  hasDuplicatePendingRequest
+  sanitizeTextField
 } from '../auth/roleRequestValidation';
-import { defaultRoleApprovalEngine } from '../auth/roleApprovalEngine';
 import { 
   CalculationEngine,
   convertUnit, 
-  STANDARD_UNITS,
   ScientificFormula, 
   ScientificParameter, 
   ScientificVariable, 
   ScientificModel,
   ScientificReference,
-  InterpretationRule,
   StructuredMathEvaluator
 } from '../../scientific';
 import { 
@@ -70,13 +52,39 @@ import {
   NotebookCell,
   StatisticsAnalysis,
   User,
-  RoleRequest
+  RoleRequest,
+  Project,
+  Dataset,
+  NutriNotebook,
+  Material,
+  Team,
+  Note
 } from '../database/types';
 
 export const apiRouter = Router();
 
-const auth = createAuthMiddleware(db, defaultSessionStore);
-export const requireAuth = auth.requireAuth;
+for (const method of ['get', 'post', 'put', 'delete'] as const) {
+  const registerRoute = (apiRouter as any)[method].bind(apiRouter);
+  (apiRouter as any)[method] = (routePath: string, ...handlers: any[]) => registerRoute(
+    routePath,
+    ...handlers.map(handler => {
+      if (typeof handler !== 'function') return handler;
+      return (req: Request, res: Response, next: NextFunction) => {
+        const result = handler(req, res, next);
+        if (result && typeof result.then === 'function') {
+          return result.catch(next);
+        }
+        return result;
+      };
+    })
+  );
+}
+
+const repositories = () => getRuntimeRepositories();
+const authenticateRequest = (req: Request, res: Response, next: NextFunction) =>
+  createAuthMiddleware(repositories(), repositories().sessions).authenticate(req, res, next);
+export const requireAuth = (req: Request, res: Response, next: NextFunction) =>
+  createAuthMiddleware(repositories(), repositories().sessions).requireAuth(req, res, next);
 export { requirePermission, requireAnyPermission, requireRole, requireAdmin, hasPermission };
 
 const STORAGE_DIR = path.join(process.cwd(), 'storage', 'materials');
@@ -86,6 +94,7 @@ const upload = multer({ dest: path.join(process.cwd(), 'data', 'temp_uploads') }
 export const PUBLIC_ROUTES: Array<{ method: string; pattern: RegExp }> = [
   { method: 'GET', pattern: /^\/health\/?$/ },
   { method: 'POST', pattern: /^\/auth\/login\/?$/ },
+  { method: 'GET', pattern: /^\/auth\/google\/(url|callback)\/?$/ },
   { method: 'POST', pattern: /^\/auth\/demo-login\/?$/ },
   { method: 'POST', pattern: /^\/auth\/switch-user\/?$/ },
   { method: 'GET', pattern: /^\/units\/?$/ },
@@ -99,7 +108,7 @@ export const PUBLIC_ROUTES: Array<{ method: string; pattern: RegExp }> = [
 
 // Router-wide session resolution & default authentication guard
 apiRouter.use((req: Request, res: Response, next) => {
-  auth.authenticate(req, res, () => {
+  authenticateRequest(req, res, () => {
     const isPublic = PUBLIC_ROUTES.some(r => r.method === req.method && r.pattern.test(req.path));
     if (isPublic) {
       return next();
@@ -131,32 +140,408 @@ export function getCurrentUser(req: Request): User {
   throw new Error('Unauthenticated request: req.user is undefined. Ensure requireAuth middleware is applied.');
 }
 
+type ObjectAction = 'READ' | 'WRITE' | 'DELETE' | 'SHARE' | 'MANAGE_MEMBERS';
+type ObjectAuthorization = { allowed: boolean; reason?: string; isAdminOverride?: boolean };
+
+async function writeAudit(
+  user: User,
+  action: string,
+  entityType: string,
+  entityId: string,
+  details: string,
+  ipAddress?: string
+): Promise<void> {
+  await repositories().auditLogs.appendLog({
+    user_id: user.id,
+    user_name: user.name,
+    action: action as any,
+    entity_type: entityType,
+    entity_id: entityId,
+    details,
+    ip_address: ipAddress
+  });
+}
+
+function activeAccount(user: User, objectName: string): ObjectAuthorization | null {
+  return user.account_status && user.account_status !== 'ACTIVE'
+    ? { allowed: false, reason: `Account is ${user.account_status}. Access to ${objectName} is forbidden.` }
+    : null;
+}
+
+async function canAccessProject(user: User, project: Project, action: ObjectAction = 'READ'): Promise<ObjectAuthorization> {
+  return canAccessProjectWithRepositories(repositories(), user, project, action);
+}
+
+async function canAccessDataset(user: User, dataset: Dataset, action: ObjectAction = 'READ'): Promise<ObjectAuthorization> {
+  const inactive = activeAccount(user, 'dataset');
+  if (inactive) return inactive;
+  if (dataset.uploaded_by === user.id) return { allowed: true };
+  const parent = await repositories().projects.findById(dataset.project_id);
+  if (parent) return canAccessProject(user, parent, action);
+  return hasPermission(user, 'ADMIN')
+    ? { allowed: true, isAdminOverride: true }
+    : { allowed: false, reason: `No access to dataset "${dataset.id}" or parent project.` };
+}
+
+async function canAccessNotebook(user: User, notebook: NutriNotebook, action: ObjectAction = 'READ'): Promise<ObjectAuthorization> {
+  const inactive = activeAccount(user, 'notebook');
+  if (inactive) return inactive;
+  if (notebook.created_by === user.id) return { allowed: true };
+  const parent = await repositories().projects.findById(notebook.project_id);
+  if (parent) return canAccessProject(user, parent, action);
+  return hasPermission(user, 'ADMIN')
+    ? { allowed: true, isAdminOverride: true }
+    : { allowed: false, reason: `No access to notebook "${notebook.id}" or parent project.` };
+}
+
+async function canAccessNotebookCell(user: User, cell: NotebookCell, action: ObjectAction = 'READ'): Promise<ObjectAuthorization> {
+  const inactive = activeAccount(user, 'notebook cell');
+  if (inactive) return inactive;
+  const parent = await repositories().researchArtifacts.getNotebookWithCells(cell.notebook_id);
+  return parent
+    ? canAccessNotebook(user, parent.notebook, action)
+    : { allowed: false, reason: `Notebook "${cell.notebook_id}" not found.` };
+}
+
+async function canAccessMaterial(user: User, material: Material, action: ObjectAction = 'READ'): Promise<ObjectAuthorization> {
+  return canAccessMaterialWithRepositories(repositories(), user, material, action);
+}
+
+async function canAccessExperiment(user: User, experiment: Experiment, action: ObjectAction = 'READ'): Promise<ObjectAuthorization> {
+  const inactive = activeAccount(user, 'experiment');
+  if (inactive) return inactive;
+  if (experiment.created_by === user.id) return { allowed: true };
+  const parent = await repositories().projects.findById(experiment.project_id);
+  if (parent) return canAccessProject(user, parent, action);
+  return hasPermission(user, 'ADMIN')
+    ? { allowed: true, isAdminOverride: true }
+    : { allowed: false, reason: `User lacks ${action} authorization for experiment "${experiment.id}".` };
+}
+
+async function canAccessTeam(user: User, team: Team, action: ObjectAction = 'READ'): Promise<ObjectAuthorization> {
+  const inactive = activeAccount(user, 'team');
+  if (inactive) return inactive;
+  if (team.owner_id === user.id) return { allowed: true };
+  const member = (await repositories().memberships.getTeamMembers(team.id))
+    .find(candidate => candidate.user_id === user.id);
+  if (action === 'READ') return { allowed: true };
+  if (member && (
+    (action === 'WRITE' && ['Owner', 'Editor'].includes(member.role)) ||
+    (['DELETE', 'SHARE', 'MANAGE_MEMBERS'].includes(action) && member.role === 'Owner')
+  )) return { allowed: true };
+  if (hasPermission(user, 'ADMIN')) return { allowed: true, isAdminOverride: true };
+  return {
+    allowed: false,
+    reason: member ? `Team member role "${member.role}" lacks ${action} access.` : `User lacks ${action} privilege on team "${team.id}".`
+  };
+}
+
+async function canAccessNote(user: User, note: Note, action: ObjectAction = 'READ'): Promise<ObjectAuthorization> {
+  const inactive = activeAccount(user, 'note');
+  if (inactive) return inactive;
+  if (note.user_id === user.id) return { allowed: true };
+  if (action === 'READ' && note.project_id) {
+    const project = await repositories().projects.findById(note.project_id);
+    if (project && (await canAccessProject(user, project, 'READ')).allowed) return { allowed: true };
+  }
+  return hasPermission(user, 'ADMIN')
+    ? { allowed: true, isAdminOverride: true }
+    : { allowed: false, reason: `User "${user.id}" cannot access note "${note.id}" owned by "${note.user_id}".` };
+}
+
+async function authorizeObject<T>(
+  req: Request,
+  res: Response,
+  entityId: string,
+  entityType: string,
+  action: ObjectAction,
+  find: () => Promise<T | null>,
+  check: (user: User, entity: T, action: ObjectAction) => Promise<ObjectAuthorization>
+): Promise<T | null> {
+  const user = getCurrentUser(req);
+  const entity = await find();
+  if (!entity) {
+    res.status(404).json({ error: `${entityType[0]}${entityType.slice(1).toLowerCase()} not found` });
+    return null;
+  }
+  const result = await check(user, entity, action);
+  const typed = entity as any;
+  if (!result.allowed) {
+    await writeAudit(user, 'VERIFY', 'SECURITY_BOLA', entityId,
+      `BOLA Denied: ${user.name} denied ${action} on ${entityType.toLowerCase()} "${entityId}": ${result.reason}`, req.ip);
+    res.status(403).json({
+      error: `Access denied: You do not have ${action} permission for this ${entityType.toLowerCase()}`,
+      code: 'OBJECT_ACCESS_DENIED',
+      entity_type: entityType,
+      entity_id: entityId,
+      reason: result.reason
+    });
+    return null;
+  }
+  if (result.isAdminOverride) {
+    await writeAudit(user, 'VERIFY', 'ADMIN_OVERRIDE', entityId,
+      `Admin override: ${user.name} performed ${action} on ${entityType.toLowerCase()} "${typed.name || typed.title || entityId}" (${entityId})`, req.ip);
+  }
+  return entity;
+}
+
+const authorizeProject = (req: Request, res: Response, id: string, action: ObjectAction = 'READ') =>
+  authorizeObject(req, res, id, 'PROJECT', action, () => repositories().projects.findById(id), canAccessProject);
+const authorizeDataset = (req: Request, res: Response, id: string, action: ObjectAction = 'READ') =>
+  authorizeObject(req, res, id, 'DATASET', action, () => repositories().datasets.findById(id), canAccessDataset);
+const authorizeNotebook = (req: Request, res: Response, id: string, action: ObjectAction = 'READ') =>
+  authorizeObject(req, res, id, 'NOTEBOOK', action, async () =>
+    (await repositories().researchArtifacts.getNotebookWithCells(id))?.notebook ?? null, canAccessNotebook);
+const authorizeMaterial = (req: Request, res: Response, id: string, action: ObjectAction = 'READ') =>
+  authorizeObject(req, res, id, 'MATERIAL', action, () => repositories().materials.findById(id), canAccessMaterial);
+const authorizeExperiment = (req: Request, res: Response, id: string, action: ObjectAction = 'READ') =>
+  authorizeObject(req, res, id, 'EXPERIMENT', action, () => repositories().researchArtifacts.getExperimentById(id), canAccessExperiment);
+const authorizeTeam = (req: Request, res: Response, id: string, action: ObjectAction = 'READ') =>
+  authorizeObject(req, res, id, 'TEAM', action, () => repositories().memberships.getTeam(id), canAccessTeam);
+const authorizeNote = (req: Request, res: Response, id: string, action: ObjectAction = 'READ') =>
+  authorizeObject(req, res, id, 'NOTE', action, async () =>
+    (await repositories().materials.getAllNotes()).find(note => note.id === id) ?? null, canAccessNote);
+const authorizeNotebookCell = async (
+  req: Request, res: Response, cell: NotebookCell, action: ObjectAction = 'READ'
+) => {
+  const result = await canAccessNotebookCell(getCurrentUser(req), cell, action);
+  if (result.allowed) return cell;
+  await writeAudit(getCurrentUser(req), 'VERIFY', 'SECURITY_BOLA', cell.id,
+    `BOLA Denied: ${getCurrentUser(req).name} denied ${action} on notebook cell "${cell.id}"`, req.ip);
+  res.status(403).json({ error: `Access denied: You do not have permission to access this notebook cell`, code: 'OBJECT_ACCESS_DENIED', reason: result.reason });
+  return null;
+};
+const authorizeRoleRequest = async (req: Request, res: Response, id: string, action: ObjectAction = 'READ') => {
+  const request = await repositories().roleRequests.findById(id);
+  if (!request) {
+    res.status(404).json({ error: 'Role request not found', code: 'NOT_FOUND' });
+    return null;
+  }
+  const user = getCurrentUser(req);
+  if (request.user_id === user.id || hasPermission(user, 'ADMIN')) return request;
+  await writeAudit(
+    user,
+    'VERIFY',
+    'SECURITY_BOLA',
+    request.request_id,
+    `BOLA Denied: ${user.name} denied ${action} on role request "${request.request_id}"`,
+    req.ip
+  );
+  res.status(403).json({
+    error: `Access denied: You do not have ${action} permission for this role request`,
+    code: 'OBJECT_ACCESS_DENIED',
+    entity_type: 'ROLE_REQUEST',
+    entity_id: request.request_id
+  });
+  return null;
+};
+
 // ----------------------------------------------------
 // 1. AUTH & USERS (MVS-B2.2 Verified Session Management)
 // ----------------------------------------------------
 
-apiRouter.get('/auth/me', requireAuth, (req: Request, res: Response) => {
+function sendGooglePopupResult(
+  res: Response,
+  targetOrigin: string,
+  statusCode: number,
+  message: Record<string, unknown>
+): void {
+  const nonce = crypto.randomBytes(18).toString('base64url');
+  const payload = JSON.stringify(message)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+
+  res.status(statusCode).set({
+    'Cache-Control': 'no-store',
+    'Content-Security-Policy': `default-src 'none'; script-src 'nonce-${nonce}'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'`,
+    'Referrer-Policy': 'no-referrer',
+    'X-Content-Type-Options': 'nosniff'
+  }).type('html').send(`<!doctype html><html><head><meta charset="utf-8"><title>Masuk dengan Google</title></head><body><p>Autentikasi selesai. Anda dapat menutup jendela ini.</p><script nonce="${nonce}">if (window.opener) window.opener.postMessage(${payload}, ${JSON.stringify(targetOrigin)}); window.close();</script></body></html>`);
+}
+
+apiRouter.get('/auth/google/url', async (_req: Request, res: Response) => {
+  const config = getOIDCConfig();
+  if (!config.enabled) {
+    return res.status(404).json({ error: 'Google authentication is disabled.', code: 'OIDC_DISABLED' });
+  }
+  if (!validateOIDCConfig(config).valid) {
+    return res.status(503).json({ error: 'Google authentication is not configured.', code: 'OIDC_CONFIGURATION_INVALID' });
+  }
+
+  const result = await initiateGoogleLogin();
+  if (!result.success || !result.authorizationUrl) {
+    return res.status(503).json({ error: 'Google authentication could not be started.', code: 'OIDC_INIT_FAILED' });
+  }
+
+  res.set({ 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
+  return res.json({ url: result.authorizationUrl });
+});
+
+apiRouter.get('/auth/google/callback', async (req: Request, res: Response) => {
+  const config = getOIDCConfig();
+  if (!config.enabled) {
+    return res.status(404).json({ error: 'Google authentication is disabled.', code: 'OIDC_DISABLED' });
+  }
+
+  const configValidation = validateOIDCConfig(config);
+  if (!configValidation.valid) {
+    return res.status(503).json({ error: 'Google authentication is not configured.', code: 'OIDC_CONFIGURATION_INVALID' });
+  }
+
+  const redirect = new URL(config.redirectUri);
+  const localHttpRedirect = redirect.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(redirect.hostname);
+  if (redirect.protocol !== 'https:' && !localHttpRedirect) {
+    return res.status(503).json({ error: 'Google authentication redirect is not trusted.', code: 'OIDC_CONFIGURATION_INVALID' });
+  }
+  const targetOrigin = redirect.origin;
+
+  const callback = await handleGoogleCallback({
+    code: typeof req.query.code === 'string' ? req.query.code : undefined,
+    state: typeof req.query.state === 'string' ? req.query.state : undefined,
+    error: typeof req.query.error === 'string' ? req.query.error : undefined,
+    error_description: typeof req.query.error_description === 'string' ? req.query.error_description : undefined
+  });
+
+  if (!callback.success || !callback.identity) {
+    const code = callback.code || 'OIDC_CALLBACK_FAILED';
+    const statusCode = code.includes('STATE') || code.includes('TRANSACTION') || code.includes('INPUT') || code.includes('PROVIDER_DENIED')
+      ? 400
+      : 401;
+    return sendGooglePopupResult(res, targetOrigin, statusCode, { type: 'GOOGLE_AUTH_ERROR', code });
+  }
+
+  const provisioned = await provisionVerifiedGoogleIdentity(callback.identity, { ipAddress: req.ip });
+  if (!provisioned.success || !provisioned.user) {
+    const statusCode = provisioned.outcome === 'IDENTITY_CONFLICT' ? 409
+      : provisioned.outcome === 'ACCOUNT_INACTIVE' ? 403
+        : provisioned.outcome === 'PROVISIONING_STORAGE_FAILURE' ? 503 : 401;
+    return sendGooglePopupResult(res, targetOrigin, statusCode, {
+      type: 'GOOGLE_AUTH_ERROR',
+      code: provisioned.outcome
+    });
+  }
+
+  try {
+    const issued = await repositories().unitOfWork.runInTransaction(async tx => {
+      const activeUser = await repositories().users.findById(provisioned.user!.id, tx);
+      if (!activeUser || (activeUser.account_status && activeUser.account_status !== 'ACTIVE')) return null;
+
+      const now = new Date().toISOString();
+      const session = await repositories().sessions.createSession(
+        activeUser.id,
+        getAuthConfig().sessionTtlSeconds,
+        activeUser.token_version || 1,
+        tx
+      );
+      const updatedUser = await repositories().users.update(activeUser.id, { last_login_at: now }, tx);
+      await repositories().auditLogs.appendLog({
+        user_id: updatedUser.id,
+        user_name: updatedUser.name,
+        action: 'LOGIN',
+        entity_type: 'USER',
+        entity_id: updatedUser.id,
+        details: `Google OIDC session issued for ${updatedUser.name}.`,
+        ip_address: req.ip,
+        timestamp: now
+      }, tx);
+      return { session, user: updatedUser };
+    });
+
+    if (!issued) {
+      return sendGooglePopupResult(res, targetOrigin, 403, {
+        type: 'GOOGLE_AUTH_ERROR',
+        code: 'ACCOUNT_INACTIVE'
+      });
+    }
+
+    const user = issued.user;
+    return sendGooglePopupResult(res, targetOrigin, 200, {
+      type: 'GOOGLE_AUTH_SUCCESS',
+      token: issued.session.token,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        permissions: user.permissions,
+        organization: user.organization,
+        avatar_url: user.avatar_url,
+        created_at: user.created_at,
+        last_login_at: user.last_login_at,
+        account_status: user.account_status,
+        email_verified: user.email_verified,
+        is_main_admin: user.is_main_admin === true
+      }
+    });
+  } catch {
+    return sendGooglePopupResult(res, targetOrigin, 503, {
+      type: 'GOOGLE_AUTH_ERROR',
+      code: 'SESSION_ISSUANCE_FAILED'
+    });
+  }
+});
+
+apiRouter.get('/auth/me', requireAuth, async (req: Request, res: Response) => {
   res.json({ user: req.user });
 });
 
-apiRouter.post('/auth/logout', requireAuth, (req: Request, res: Response) => {
+apiRouter.get('/health', async (_req: Request, res: Response, next) => {
+  const runtime = getRuntimeSelection();
+  if (!runtime) {
+    return res.status(503).json({
+      status: 'degraded',
+      application: 'alive',
+      database: 'not_initialized',
+      repository_available: false
+    });
+  }
+
+  try {
+    const health = await runtime.healthCheck();
+    return res.status(health.ok ? 200 : 503).json({
+    status: health.ok ? 'ok' : 'degraded',
+    application: 'alive',
+    provider: runtime?.provider ?? 'json',
+    database: health.databaseName ?? null,
+    schema: health.schemaName ?? null,
+    branch_id: health.branchId ?? null,
+    tls_verified: health.tlsVerified ?? null,
+    repository_available: Boolean(runtime.repositories)
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+apiRouter.post('/auth/logout', requireAuth, async (req: Request, res: Response) => {
   const token = req.sessionToken || extractToken(req);
   if (token) {
-    defaultSessionStore.revokeSession(token);
+    await repositories().sessions.revokeSession(token);
   }
   if (req.user) {
-    db.logAudit(req.user.id, 'LOGIN', 'USER', req.user.id, `User session logged out for ${req.user.name}`);
+    await writeAudit(req.user, 'LOGIN', 'USER', req.user.id, `User session logged out for ${req.user.name}`, req.ip);
   }
   res.json({ success: true, message: 'Logged out successfully' });
 });
 
-apiRouter.post('/auth/logout-all', requireAuth, (req: Request, res: Response) => {
+apiRouter.post('/auth/logout-all', requireAuth, async (req: Request, res: Response) => {
   const user = req.user!;
-  const result = db.emergencyRevokeUserSessions({
-    userId: user.id,
-    actorId: user.id,
-    reason: 'User initiated global logout from all devices',
-    ipAddress: req.ip
+  const result = await repositories().unitOfWork.runInTransaction(async tx => {
+    const revokedSessionsCount = await repositories().sessions.revokeSessionsForUser(user.id, tx);
+    const tokenVersion = await repositories().users.incrementTokenVersion(user.id, tx);
+    await repositories().auditLogs.appendLog({
+      user_id: user.id,
+      user_name: user.name,
+      action: 'SESSION_REVOCATION',
+      entity_type: 'USER',
+      entity_id: user.id,
+      details: 'User initiated global logout from all devices',
+      ip_address: req.ip
+    }, tx);
+    return { userId: user.id, tokenVersion, revokedSessionsCount };
   });
   res.json({
     success: true,
@@ -167,7 +552,7 @@ apiRouter.post('/auth/logout-all', requireAuth, (req: Request, res: Response) =>
   });
 });
 
-apiRouter.post('/auth/login', (req: Request, res: Response) => {
+apiRouter.post('/auth/login', async (req: Request, res: Response) => {
   const config = getAuthConfig();
   if (config.isProduction) {
     return res.status(501).json({
@@ -181,7 +566,7 @@ apiRouter.post('/auth/login', (req: Request, res: Response) => {
   });
 });
 
-apiRouter.post('/auth/demo-login', (req: Request, res: Response) => {
+apiRouter.post('/auth/demo-login', async (req: Request, res: Response) => {
   const config = getAuthConfig();
   if (!config.enableDemoAuth) {
     return res.status(403).json({
@@ -195,8 +580,7 @@ apiRouter.post('/auth/demo-login', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'user_id is required' });
   }
 
-  const state = db.getState();
-  const user = state.users.find(u => u.id === user_id);
+  const user = await repositories().users.findById(user_id);
   if (!user) {
     return res.status(404).json({ error: 'User not found in demo fixtures' });
   }
@@ -209,18 +593,18 @@ apiRouter.post('/auth/demo-login', (req: Request, res: Response) => {
     });
   }
 
-  const { token, expiresAt } = defaultSessionStore.createSession(user.id, config.sessionTtlSeconds, user.token_version || 1);
-  user.last_login_at = new Date().toISOString();
-  db.logAudit(user.id, 'LOGIN', 'USER', user.id, `Demo session issued for ${user.name} (${user.role})`);
+  const { token, expiresAt } = await repositories().sessions.createSession(user.id, config.sessionTtlSeconds, user.token_version || 1);
+  const updatedUser = await repositories().users.update(user.id, { last_login_at: new Date().toISOString() });
+  await writeAudit(updatedUser, 'LOGIN', 'USER', user.id, `Demo session issued for ${user.name} (${user.role})`, req.ip);
 
   res.json({
     token,
-    user: { ...user },
+    user: updatedUser,
     expires_at: expiresAt
   });
 });
 
-apiRouter.post('/auth/switch-user', (req: Request, res: Response) => {
+apiRouter.post('/auth/switch-user', async (req: Request, res: Response) => {
   const config = getAuthConfig();
   if (!config.enableDemoAuth) {
     return res.status(403).json({
@@ -234,8 +618,7 @@ apiRouter.post('/auth/switch-user', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'user_id is required' });
   }
 
-  const state = db.getState();
-  const user = state.users.find(u => u.id === user_id);
+  const user = await repositories().users.findById(user_id);
   if (!user) {
     return res.status(404).json({ error: 'User not found' });
   }
@@ -251,22 +634,28 @@ apiRouter.post('/auth/switch-user', (req: Request, res: Response) => {
   // Revoke existing token if provided
   const oldToken = extractToken(req);
   if (oldToken) {
-    defaultSessionStore.revokeSession(oldToken);
+    await repositories().sessions.revokeSession(oldToken);
   }
 
-  const { token, expiresAt } = defaultSessionStore.createSession(user.id, config.sessionTtlSeconds, user.token_version || 1);
-  user.last_login_at = new Date().toISOString();
-  db.logAudit(user.id, 'LOGIN', 'USER', user.id, `Demo session switched to ${user.name} (${user.role})`);
+  const { token, expiresAt } = await repositories().sessions.createSession(user.id, config.sessionTtlSeconds, user.token_version || 1);
+  const updatedUser = await repositories().users.update(user.id, { last_login_at: new Date().toISOString() });
+  await writeAudit(updatedUser, 'LOGIN', 'USER', user.id, `Demo session switched to ${user.name} (${user.role})`, req.ip);
 
   res.json({
     token,
-    user: { ...user },
+    user: updatedUser,
     expires_at: expiresAt
   });
 });
 
-apiRouter.get('/users', requireAuth, (req: Request, res: Response) => {
-  res.json({ users: db.getState().users });
+apiRouter.get('/users', requireAuth, async (req: Request, res: Response) => {
+  if (!hasPermission(getCurrentUser(req), 'ADMIN') && !getAuthConfig().enableDemoAuth) {
+    return res.status(403).json({
+      error: 'Administrator permission is required to list user profiles.',
+      code: 'INSUFFICIENT_PERMISSION'
+    });
+  }
+  res.json({ users: await repositories().users.listAll() });
 });
 
 // ----------------------------------------------------
@@ -293,7 +682,7 @@ function checkActiveAccount(req: Request, res: Response): boolean {
   return true;
 }
 
-apiRouter.post('/role-requests', requireAuth, (req: Request, res: Response) => {
+apiRouter.post('/role-requests', requireAuth, async (req: Request, res: Response) => {
   if (!checkActiveAccount(req, res)) return;
   const user = getCurrentUser(req);
 
@@ -334,11 +723,7 @@ apiRouter.post('/role-requests', requireAuth, (req: Request, res: Response) => {
   }
 
   // 4. Duplicate active pending request check (API layer)
-  const state = db.getState();
-  if (!state.role_requests) {
-    state.role_requests = [];
-  }
-  const duplicate = hasDuplicatePendingRequest(state.role_requests, user.id, requestedRole);
+  const duplicate = await repositories().roleRequests.findPendingByUserAndRole(user.id, requestedRole);
   if (duplicate) {
     return res.status(409).json({
       error: `A pending request for role '${requestedRole}' already exists.`,
@@ -349,12 +734,31 @@ apiRouter.post('/role-requests', requireAuth, (req: Request, res: Response) => {
 
   // 5. Construct and persist RoleRequest entity via storage-level atomic method
   try {
-    const { roleRequest } = db.createRoleRequest({
-      userId: user.id,
-      requestedRole,
-      institution: instVal.sanitized,
-      justification: justVal.sanitized,
-      ipAddress: req.ip
+    const roleRequest = await repositories().unitOfWork.runInTransaction(async tx => {
+      const duplicate = await repositories().roleRequests.findPendingByUserAndRole(user.id, requestedRole, tx);
+      if (duplicate) throw new Error(`Duplicate pending role request: ${duplicate.request_id}`);
+      const request = await repositories().roleRequests.create({
+        request_id: `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        user_id: user.id,
+        requested_role: requestedRole,
+        approval_status: 'PENDING',
+        institution: instVal.sanitized || undefined,
+        justification: justVal.sanitized || undefined,
+        created_at: new Date().toISOString(),
+        reviewed_by: null,
+        reviewed_at: null,
+        review_reason: null
+      }, tx);
+      await repositories().auditLogs.appendLog({
+        user_id: user.id,
+        user_name: user.name,
+        action: 'CREATE',
+        entity_type: 'ROLE_REQUEST',
+        entity_id: request.request_id,
+        details: `Role elevation request submitted by ${user.name} (${user.id}) for ${requestedRole}.`,
+        ip_address: req.ip
+      }, tx);
+      return request;
     });
 
     return res.status(201).json({
@@ -368,33 +772,30 @@ apiRouter.post('/role-requests', requireAuth, (req: Request, res: Response) => {
         code: 'DUPLICATE_PENDING_REQUEST'
       });
     }
-    return res.status(500).json({
-      error: `Failed to persist role request: ${err.message}`,
-      code: 'STORAGE_FAILURE'
-    });
+    throw err;
   }
 });
 
-apiRouter.get('/role-requests/me', requireAuth, (req: Request, res: Response) => {
+apiRouter.get('/role-requests/me', requireAuth, async (req: Request, res: Response) => {
   if (!checkActiveAccount(req, res)) return;
   const user = getCurrentUser(req);
-  const requests = db.getRoleRequestsForUser(user.id);
+  const requests = await repositories().roleRequests.listByUserId(user.id);
   res.json({
     role_requests: requests,
     total: requests.length
   });
 });
 
-apiRouter.get('/role-requests/:id', requireAuth, (req: Request, res: Response) => {
+apiRouter.get('/role-requests/:id', requireAuth, async (req: Request, res: Response) => {
   if (!checkActiveAccount(req, res)) return;
-  const roleRequest = authorizeRoleRequest(req, res, req.params.id, 'READ');
+  const roleRequest = await authorizeRoleRequest(req, res, req.params.id, 'READ');
   if (!roleRequest) {
     return;
   }
   res.json({ role_request: roleRequest });
 });
 
-apiRouter.get('/role-requests', requireAuth, (req: Request, res: Response) => {
+apiRouter.get('/role-requests', requireAuth, async (req: Request, res: Response) => {
   if (!checkActiveAccount(req, res)) return;
   const user = getCurrentUser(req);
   if (!hasPermission(user, 'ADMIN')) {
@@ -405,7 +806,7 @@ apiRouter.get('/role-requests', requireAuth, (req: Request, res: Response) => {
     });
   }
 
-  let requests = db.getRoleRequests();
+  let requests = await repositories().roleRequests.listAll();
   const { status, user_id } = req.query;
   if (status && typeof status === 'string') {
     requests = requests.filter(r => r.approval_status === status.toUpperCase());
@@ -426,7 +827,7 @@ apiRouter.post('/role-requests/:id/approve', requireAuth, async (req: Request, r
   const { review_reason } = req.body || {};
 
   try {
-    const result = await defaultRoleApprovalEngine.approve({
+    const result = await new RoleApprovalEngine(repositories()).approve({
       requestId: req.params.id,
       reviewer: user,
       reviewReason: review_reason,
@@ -435,6 +836,7 @@ apiRouter.post('/role-requests/:id/approve', requireAuth, async (req: Request, r
 
     return res.status(200).json(result);
   } catch (err: any) {
+    if (!err.statusCode) throw err;
     const statusCode = err.statusCode || 500;
     return res.status(statusCode).json({
       error: err.message,
@@ -450,7 +852,7 @@ apiRouter.post('/role-requests/:id/reject', requireAuth, async (req: Request, re
   const { review_reason } = req.body || {};
 
   try {
-    const result = await defaultRoleApprovalEngine.reject({
+    const result = await new RoleApprovalEngine(repositories()).reject({
       requestId: req.params.id,
       reviewer: user,
       reviewReason: review_reason,
@@ -459,6 +861,7 @@ apiRouter.post('/role-requests/:id/reject', requireAuth, async (req: Request, re
 
     return res.status(200).json(result);
   } catch (err: any) {
+    if (!err.statusCode) throw err;
     const statusCode = err.statusCode || 500;
     return res.status(statusCode).json({
       error: err.message,
@@ -473,7 +876,7 @@ apiRouter.post('/role-requests/:id/cancel', requireAuth, async (req: Request, re
   const user = getCurrentUser(req);
 
   try {
-    const result = await defaultRoleApprovalEngine.cancel({
+    const result = await new RoleApprovalEngine(repositories()).cancel({
       requestId: req.params.id,
       caller: user,
       ipAddress: req.ip
@@ -481,6 +884,7 @@ apiRouter.post('/role-requests/:id/cancel', requireAuth, async (req: Request, re
 
     return res.status(200).json(result);
   } catch (err: any) {
+    if (!err.statusCode) throw err;
     const statusCode = err.statusCode || 500;
     return res.status(statusCode).json({
       error: err.message,
@@ -494,7 +898,7 @@ apiRouter.post('/role-requests/:id/cancel', requireAuth, async (req: Request, re
 // 1C. ADMINISTRATIVE USER & SESSION MANAGEMENT (MVS-B2.5B.4)
 // ----------------------------------------------------
 
-apiRouter.post('/admin/users/:id/status', requireAuth, requireAdmin(), (req: Request, res: Response) => {
+apiRouter.post('/admin/users/:id/status', requireAuth, requireAdmin(), async (req: Request, res: Response) => {
   const targetId = req.params.id;
   const { status, reason } = req.body || {};
 
@@ -512,31 +916,40 @@ apiRouter.post('/admin/users/:id/status', requireAuth, requireAdmin(), (req: Req
     });
   }
 
-  try {
-    const result = db.updateUserAccountStatus({
-      userId: targetId,
-      newStatus: status,
-      actorId: req.user!.id,
-      reason: reason.trim(),
-      ipAddress: req.ip
-    });
-
-    return res.status(200).json({
-      success: true,
-      user: result.user,
-      revoked_sessions_count: result.revokedSessionsCount,
-      previous_status: result.previousStatus
-    });
-  } catch (err: any) {
-    const statusCode = err.statusCode || 400;
-    return res.status(statusCode).json({
-      error: err.message,
-      code: err.code || 'STATUS_UPDATE_FAILED'
+  const actor = req.user!;
+  const target = await repositories().users.findById(targetId);
+  if (!target) return res.status(404).json({ error: `User not found: ${targetId}`, code: 'USER_NOT_FOUND' });
+  if (target.is_main_admin && !actor.is_main_admin) {
+    return res.status(403).json({
+      error: 'Only the Main Administrator may change this account status.',
+      code: 'INSUFFICIENT_PRIVILEGE'
     });
   }
+  const previousStatus = target.account_status || 'ACTIVE';
+  const result = await repositories().unitOfWork.runInTransaction(async tx => {
+    const updatedUser = await repositories().users.updateAccountStatus(targetId, status as any, tx);
+    const revokedSessionsCount = await repositories().sessions.revokeSessionsForUser(targetId, tx);
+    await repositories().users.incrementTokenVersion(targetId, tx);
+    await repositories().auditLogs.appendLog({
+      user_id: actor.id,
+      user_name: actor.name,
+      action: 'USER_STATUS_CHANGE',
+      entity_type: 'USER',
+      entity_id: targetId,
+      details: `Account status changed from ${previousStatus} to ${status}. Reason: ${reason.trim()}`,
+      ip_address: req.ip
+    }, tx);
+    return { updatedUser, revokedSessionsCount };
+  });
+  return res.status(200).json({
+    success: true,
+    user: result.updatedUser,
+    revoked_sessions_count: result.revokedSessionsCount,
+    previous_status: previousStatus
+  });
 });
 
-apiRouter.post('/admin/users/:id/revoke-sessions', requireAuth, requireAdmin(), (req: Request, res: Response) => {
+apiRouter.post('/admin/users/:id/revoke-sessions', requireAuth, requireAdmin(), async (req: Request, res: Response) => {
   const targetId = req.params.id;
   const { reason } = req.body || {};
 
@@ -547,41 +960,45 @@ apiRouter.post('/admin/users/:id/revoke-sessions', requireAuth, requireAdmin(), 
     });
   }
 
-  try {
-    const result = db.emergencyRevokeUserSessions({
-      userId: targetId,
-      actorId: req.user!.id,
-      reason: reason.trim(),
-      ipAddress: req.ip
-    });
-
-    return res.status(200).json({
-      success: true,
-      user_id: result.userId,
-      new_token_version: result.tokenVersion,
-      revoked_sessions_count: result.revokedSessionsCount
-    });
-  } catch (err: any) {
-    const statusCode = err.statusCode || 400;
-    return res.status(statusCode).json({
-      error: err.message,
-      code: err.code || 'REVOCATION_FAILED'
-    });
-  }
+  const actor = req.user!;
+  const target = await repositories().users.findById(targetId);
+  if (!target) return res.status(404).json({ error: `User not found: ${targetId}`, code: 'USER_NOT_FOUND' });
+  const result = await repositories().unitOfWork.runInTransaction(async tx => {
+    const revokedSessionsCount = await repositories().sessions.revokeSessionsForUser(targetId, tx);
+    const tokenVersion = await repositories().users.incrementTokenVersion(targetId, tx);
+    await repositories().auditLogs.appendLog({
+      user_id: actor.id,
+      user_name: actor.name,
+      action: 'SESSION_REVOCATION',
+      entity_type: 'USER',
+      entity_id: targetId,
+      details: `Administrator revoked all user sessions. Reason: ${reason.trim()}`,
+      ip_address: req.ip
+    }, tx);
+    return { userId: targetId, tokenVersion, revokedSessionsCount };
+  });
+  return res.status(200).json({
+    success: true,
+    user_id: result.userId,
+    new_token_version: result.tokenVersion,
+    revoked_sessions_count: result.revokedSessionsCount
+  });
 });
 
 // ----------------------------------------------------
 // 2. PROJECTS & TEAMS
 // ----------------------------------------------------
-apiRouter.get('/projects', (req: Request, res: Response) => {
+apiRouter.get('/projects', async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
-  const state = db.getState();
+  const allProjects = await repositories().projects.listAll();
   // Filter projects strictly accessible to user (direct owner, project member, team member, public, or admin)
-  const projects = state.projects.filter(p => canAccessProject(user, p, 'READ').allowed);
+  const projects = (await Promise.all(allProjects.map(async project =>
+    (await canAccessProject(user, project, 'READ')).allowed ? project : null
+  ))).filter((project): project is Project => project !== null);
   res.json({ projects });
 });
 
-apiRouter.post('/projects', requirePermission('CREATE'), (req: Request, res: Response) => {
+apiRouter.post('/projects', requirePermission('CREATE'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { name, description, type = 'Research', is_public = false, tags = [], team_id } = req.body;
 
@@ -591,11 +1008,11 @@ apiRouter.post('/projects', requirePermission('CREATE'), (req: Request, res: Res
 
   // Validate team_id association if specified
   if (team_id) {
-    const team = db.getState().teams.find(t => t.id === team_id);
+    const team = await repositories().memberships.getTeam(team_id);
     if (!team) {
       return res.status(404).json({ error: 'Associated team not found' });
     }
-    const teamAuth = canAccessTeam(user, team, 'WRITE');
+    const teamAuth = await canAccessTeam(user, team, 'WRITE');
     if (!teamAuth.allowed) {
       return res.status(403).json({
         error: 'Access denied: You do not have permission to attach projects to this team',
@@ -618,37 +1035,41 @@ apiRouter.post('/projects', requirePermission('CREATE'), (req: Request, res: Res
     updated_at: new Date().toISOString()
   };
 
-  const state = db.getState();
-  state.projects.unshift(newProject);
-  state.project_members.push({
-    id: `pm_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
-    project_id: newProject.id,
-    user_id: user.id,
-    role: 'Owner',
-    joined_at: new Date().toISOString()
+  await repositories().unitOfWork.runInTransaction(async tx => {
+    await repositories().projects.create(newProject, tx);
+    await repositories().memberships.addProjectMember({
+      id: `pm_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
+      project_id: newProject.id,
+      user_id: user.id,
+      role: 'Owner',
+      joined_at: new Date().toISOString()
+    }, tx);
   });
 
-  db.logAudit(user.id, 'CREATE', 'PROJECT', newProject.id, `Created project "${newProject.name}"`);
+  await writeAudit(user, 'CREATE', 'PROJECT', newProject.id, `Created project "${newProject.name}"`, req.ip);
   res.status(201).json({ project: newProject });
 });
 
-apiRouter.get('/projects/:id', (req: Request, res: Response) => {
-  const project = authorizeProject(req, res, req.params.id, 'READ');
+apiRouter.get('/projects/:id', async (req: Request, res: Response) => {
+  const project = await authorizeProject(req, res, req.params.id, 'READ');
   if (!project) return;
 
-  const state = db.getState();
-  const members = state.project_members
-    .filter(pm => pm.project_id === project.id)
-    .map(pm => {
-      const u = state.users.find(usr => usr.id === pm.user_id);
-      return { ...pm, user: u };
-    });
-
-  const materials = state.materials.filter(m => m.project_ids.includes(project.id));
-  const datasets = state.datasets.filter(d => d.project_id === project.id);
-  const notebooks = state.notebooks.filter(nb => nb.project_id === project.id);
-  const experiments = state.experiments.filter(e => e.project_id === project.id);
-  const charts = state.charts.filter(c => c.project_id === project.id);
+  const [projectMembers, allUsers, allMaterials, datasets, notebooks, experiments, charts] = await Promise.all([
+    repositories().memberships.getProjectMembers(project.id),
+    repositories().users.listAll(),
+    repositories().materials.listByProject(project.id),
+    repositories().datasets.listByProject(project.id),
+    repositories().researchArtifacts.getNotebooksByProject(project.id),
+    repositories().researchArtifacts.getExperimentsByProject(project.id),
+    repositories().researchArtifacts.getChartsByProject(project.id)
+  ]);
+  const members = projectMembers.map(member => ({
+    ...member,
+    user: allUsers.find(candidate => candidate.id === member.user_id)
+  }));
+  const materials = (await Promise.all(allMaterials.map(async material =>
+    (await canAccessMaterial(getCurrentUser(req), material, 'READ')).allowed ? material : null
+  ))).filter((material): material is Material => material !== null);
 
   res.json({
     project,
@@ -661,9 +1082,9 @@ apiRouter.get('/projects/:id', (req: Request, res: Response) => {
   });
 });
 
-apiRouter.put('/projects/:id', requirePermission('EDIT'), (req: Request, res: Response) => {
+apiRouter.put('/projects/:id', requirePermission('EDIT'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
-  const project = authorizeProject(req, res, req.params.id, 'WRITE');
+  const project = await authorizeProject(req, res, req.params.id, 'WRITE');
   if (!project) return;
 
   const { name, description, type, is_public, tags } = req.body;
@@ -674,67 +1095,56 @@ apiRouter.put('/projects/:id', requirePermission('EDIT'), (req: Request, res: Re
   if (tags !== undefined && Array.isArray(tags)) project.tags = tags;
   project.updated_at = new Date().toISOString();
 
-  db.save();
-  db.logAudit(user.id, 'EDIT', 'PROJECT', project.id, `Updated project "${project.name}"`);
-  res.json({ project });
+  const updatedProject = await repositories().projects.update(project.id, project);
+  await writeAudit(user, 'EDIT', 'PROJECT', project.id, `Updated project "${updatedProject.name}"`, req.ip);
+  res.json({ project: updatedProject });
 });
 
-apiRouter.delete('/projects/:id', requirePermission('DELETE'), (req: Request, res: Response) => {
+apiRouter.delete('/projects/:id', requirePermission('DELETE'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
-  const project = authorizeProject(req, res, req.params.id, 'DELETE');
+  const project = await authorizeProject(req, res, req.params.id, 'DELETE');
   if (!project) return;
 
-  const state = db.getState();
-  const idx = state.projects.findIndex(p => p.id === project.id);
-  if (idx !== -1) {
-    state.projects.splice(idx, 1);
-  }
-  // Remove associated members
-  state.project_members = state.project_members.filter(pm => pm.project_id !== project.id);
-  db.save();
-  db.logAudit(user.id, 'DELETE', 'PROJECT', project.id, `Deleted project "${project.name}"`);
+  await repositories().unitOfWork.runInTransaction(async tx => {
+    const members = await repositories().memberships.getProjectMembers(project.id, tx);
+    for (const member of members) await repositories().memberships.removeProjectMember(project.id, member.user_id, tx);
+    await repositories().projects.delete(project.id, tx);
+  });
+  await writeAudit(user, 'DELETE', 'PROJECT', project.id, `Deleted project "${project.name}"`, req.ip);
   res.json({ success: true, message: `Project ${project.id} deleted` });
 });
 
-apiRouter.post('/projects/:id/members', requirePermission('SHARE'), (req: Request, res: Response) => {
+apiRouter.post('/projects/:id/members', requirePermission('SHARE'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
-  const project = authorizeProject(req, res, req.params.id, 'SHARE');
+  const project = await authorizeProject(req, res, req.params.id, 'SHARE');
   if (!project) return;
 
   const { user_id, role = 'Collaborator' } = req.body;
   if (!user_id) return res.status(400).json({ error: 'user_id is required' });
 
-  const state = db.getState();
-  const targetUser = state.users.find(u => u.id === user_id);
+  const targetUser = await repositories().users.findById(user_id);
   if (!targetUser) return res.status(404).json({ error: 'Target user not found' });
 
-  let member = state.project_members.find(pm => pm.project_id === project.id && pm.user_id === user_id);
-  if (member) {
-    member.role = role;
-  } else {
-    member = {
-      id: `pm_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
-      project_id: project.id,
-      user_id,
-      role,
-      joined_at: new Date().toISOString()
-    };
-    state.project_members.push(member);
-  }
-
-  db.save();
-  db.logAudit(user.id, 'SHARE', 'PROJECT', project.id, `Added member ${targetUser.name} (${role}) to project "${project.name}"`);
+  const member = await repositories().memberships.addProjectMember({
+    id: `pm_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
+    project_id: project.id,
+    user_id,
+    role,
+    joined_at: new Date().toISOString()
+  });
+  await writeAudit(user, 'SHARE', 'PROJECT', project.id, `Added member ${targetUser.name} (${role}) to project "${project.name}"`, req.ip);
   res.status(201).json({ member });
 });
 
-apiRouter.post('/projects/:id/export', (req: Request, res: Response) => {
-  const project = authorizeProject(req, res, req.params.id, 'READ');
+apiRouter.post('/projects/:id/export', async (req: Request, res: Response) => {
+  const project = await authorizeProject(req, res, req.params.id, 'READ');
   if (!project) return;
 
-  const state = db.getState();
-  const datasets = state.datasets.filter(d => d.project_id === project.id);
-  const notebooks = state.notebooks.filter(nb => nb.project_id === project.id);
-  const experiments = state.experiments.filter(e => e.project_id === project.id);
+  const [datasets, notebooks, experiments] = await Promise.all([
+    repositories().datasets.listByProject(project.id),
+    repositories().researchArtifacts.getNotebooksByProject(project.id),
+    repositories().researchArtifacts.getExperimentsByProject(project.id)
+  ]);
 
   res.json({
     project,
@@ -745,19 +1155,25 @@ apiRouter.post('/projects/:id/export', (req: Request, res: Response) => {
   });
 });
 
-apiRouter.get('/teams', (req: Request, res: Response) => {
-  const state = db.getState();
-  const teamsWithMembers = state.teams.map(t => {
-    const members = state.team_members.filter(tm => tm.team_id === t.id).map(tm => ({
-      ...tm,
-      user: state.users.find(u => u.id === tm.user_id)
-    }));
-    return { ...t, members };
-  });
+apiRouter.get('/teams', async (req: Request, res: Response) => {
+  const [teams, allUsers] = await Promise.all([
+    repositories().memberships.getTeams(),
+    repositories().users.listAll()
+  ]);
+  const teamsWithMembers = await Promise.all(teams.map(async team => {
+    const members = await repositories().memberships.getTeamMembers(team.id);
+    return {
+      ...team,
+      members: members.map(member => ({
+        ...member,
+        user: allUsers.find(candidate => candidate.id === member.user_id)
+      }))
+    };
+  }));
   res.json({ teams: teamsWithMembers });
 });
 
-apiRouter.post('/teams', requirePermission('CREATE'), (req: Request, res: Response) => {
+apiRouter.post('/teams', requirePermission('CREATE'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { name, description } = req.body;
   if (!name) return res.status(400).json({ error: 'Team name is required' });
@@ -769,27 +1185,27 @@ apiRouter.post('/teams', requirePermission('CREATE'), (req: Request, res: Respon
     owner_id: user.id,
     created_at: new Date().toISOString()
   };
-  const state = db.getState();
-  state.teams.push(team);
-  state.team_members.push({
-    id: `tm_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
-    team_id: team.id,
-    user_id: user.id,
-    role: 'Owner',
-    joined_at: new Date().toISOString()
+  await repositories().unitOfWork.runInTransaction(async tx => {
+    await repositories().memberships.createTeam(team, tx);
+    await repositories().memberships.addTeamMember({
+      id: `tm_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
+      team_id: team.id,
+      user_id: user.id,
+      role: 'Owner',
+      joined_at: new Date().toISOString()
+    }, tx);
   });
 
-  db.logAudit(user.id, 'CREATE', 'TEAM', team.id, `Created team "${team.name}"`);
+  await writeAudit(user, 'CREATE', 'TEAM', team.id, `Created team "${team.name}"`, req.ip);
   res.status(201).json({ team });
 });
 
-apiRouter.post('/teams/:id/members', (req: Request, res: Response) => {
+apiRouter.post('/teams/:id/members', async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
-  const state = db.getState();
-  const team = state.teams.find(t => t.id === req.params.id);
+  const team = await repositories().memberships.getTeam(req.params.id);
   if (!team) return res.status(404).json({ error: 'Team not found' });
 
-  const teamAuth = canAccessTeam(user, team, 'MANAGE_MEMBERS');
+  const teamAuth = await canAccessTeam(user, team, 'MANAGE_MEMBERS');
   if (!teamAuth.allowed) {
     return res.status(403).json({
       error: 'Access denied: Only team owner or administrator can manage team members',
@@ -800,42 +1216,35 @@ apiRouter.post('/teams/:id/members', (req: Request, res: Response) => {
   const { user_id, role = 'Collaborator' } = req.body;
   if (!user_id) return res.status(400).json({ error: 'user_id is required' });
 
-  const targetUser = state.users.find(u => u.id === user_id);
+  const targetUser = await repositories().users.findById(user_id);
   if (!targetUser) return res.status(404).json({ error: 'Target user not found' });
 
-  let member = state.team_members.find(tm => tm.team_id === team.id && tm.user_id === user_id);
-  if (member) {
-    member.role = role;
-  } else {
-    member = {
-      id: `tm_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
-      team_id: team.id,
-      user_id,
-      role,
-      joined_at: new Date().toISOString()
-    };
-    state.team_members.push(member);
-  }
-
-  db.save();
-  db.logAudit(user.id, 'SHARE', 'TEAM', team.id, `Added member ${targetUser.name} to team "${team.name}"`);
+  const member = await repositories().memberships.addTeamMember({
+    id: `tm_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
+    team_id: team.id,
+    user_id,
+    role,
+    joined_at: new Date().toISOString()
+  });
+  await writeAudit(user, 'SHARE', 'TEAM', team.id, `Added member ${targetUser.name} to team "${team.name}"`, req.ip);
   res.status(201).json({ member });
 });
 
 // ----------------------------------------------------
 // 3. MATERIAL BANK & DOCUMENT READER
 // ----------------------------------------------------
-apiRouter.get('/materials', (req: Request, res: Response) => {
+apiRouter.get('/materials', async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { subject, tag, project_id, search } = req.query;
-  const state = db.getState();
-
   if (project_id) {
-    const proj = authorizeProject(req, res, String(project_id), 'READ');
+    const proj = await authorizeProject(req, res, String(project_id), 'READ');
     if (!proj) return;
   }
 
-  let list = state.materials.filter(m => canAccessMaterial(user, m, 'READ').allowed);
+  let list = await repositories().materials.listAll();
+  list = (await Promise.all(list.map(async material =>
+    (await canAccessMaterial(user, material, 'READ')).allowed ? material : null
+  ))).filter((material): material is Material => material !== null);
 
   if (subject) list = list.filter(m => m.subject.toLowerCase() === String(subject).toLowerCase());
   if (tag) list = list.filter(m => m.tags.includes(String(tag)));
@@ -850,10 +1259,10 @@ apiRouter.get('/materials', (req: Request, res: Response) => {
     );
   }
 
-  res.json({ materials: list, collections: state.material_collections });
+  res.json({ materials: list, collections: await repositories().materials.getCollections() });
 });
 
-apiRouter.post('/materials/upload', requirePermission('PUBLISH'), upload.single('file'), (req: Request, res: Response) => {
+apiRouter.post('/materials/upload', requirePermission('PUBLISH'), upload.single('file'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { title, author, subject, description, year, tags, project_id, content } = req.body;
 
@@ -863,7 +1272,7 @@ apiRouter.post('/materials/upload', requirePermission('PUBLISH'), upload.single(
 
   // If linking to a project upon upload, verify write access to that project
   if (project_id) {
-    const proj = authorizeProject(req, res, String(project_id), 'WRITE');
+    const proj = await authorizeProject(req, res, String(project_id), 'WRITE');
     if (!proj) return;
   }
 
@@ -920,31 +1329,24 @@ apiRouter.post('/materials/upload', requirePermission('PUBLISH'), upload.single(
     updated_at: new Date().toISOString()
   };
 
-  const state = db.getState();
-  state.materials.unshift(newMaterial);
-  db.logAudit(user.id, 'CREATE', 'MATERIAL', newMaterial.id, `Uploaded material "${newMaterial.title}"`);
-  res.status(201).json({ material: newMaterial });
+  const savedMaterial = await repositories().materials.create(newMaterial);
+  await writeAudit(user, 'CREATE', 'MATERIAL', savedMaterial.id, `Uploaded material "${savedMaterial.title}"`, req.ip);
+  res.status(201).json({ material: savedMaterial });
 });
 
-apiRouter.post('/materials/:id/link-project', requirePermission('EDIT'), (req: Request, res: Response) => {
+apiRouter.post('/materials/:id/link-project', requirePermission('EDIT'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { project_id } = req.body;
   if (!project_id) return res.status(400).json({ error: 'project_id is required' });
 
-  const state = db.getState();
-  const material = state.materials.find(m => m.id === req.params.id);
+  const material = await repositories().materials.findById(req.params.id);
   if (!material) return res.status(404).json({ error: 'Material not found' });
 
   // 1. Verify user has write authorization on material
-  const matAuth = canAccessMaterial(user, material, 'WRITE');
+  const matAuth = await canAccessMaterial(user, material, 'WRITE');
   if (!matAuth.allowed) {
-    db.logAudit(
-      user.id,
-      'VERIFY',
-      'SECURITY_BOLA',
-      material.id,
-      `BOLA Denied: ${user.name} denied linking material "${material.title}" without write authorization`
-    );
+    await writeAudit(user, 'VERIFY', 'SECURITY_BOLA', material.id,
+      `BOLA Denied: ${user.name} denied linking material "${material.title}" without write authorization`, req.ip);
     return res.status(403).json({
       error: 'Access denied: You do not have permission to link this material',
       code: 'OBJECT_ACCESS_DENIED',
@@ -953,19 +1355,19 @@ apiRouter.post('/materials/:id/link-project', requirePermission('EDIT'), (req: R
   }
 
   // 2. Verify user has write authorization on target project
-  const project = authorizeProject(req, res, String(project_id), 'WRITE');
+  const project = await authorizeProject(req, res, String(project_id), 'WRITE');
   if (!project) return;
 
-  if (!material.project_ids.includes(project_id)) {
-    material.project_ids.push(project_id);
-    material.updated_at = new Date().toISOString();
-    db.logAudit(user.id, 'EDIT', 'MATERIAL', material.id, `Linked material to project "${project_id}"`);
+  const wasLinked = material.project_ids.includes(String(project_id));
+  const updatedMaterial = await repositories().materials.linkToProject(material.id, String(project_id));
+  if (!wasLinked) {
+    await writeAudit(user, 'EDIT', 'MATERIAL', material.id, `Linked material to project "${project_id}"`, req.ip);
   }
-  res.json({ material });
+  res.json({ material: updatedMaterial ?? material });
 });
 
-apiRouter.get('/materials/:id/download', (req: Request, res: Response) => {
-  const material = authorizeMaterial(req, res, req.params.id, 'READ');
+apiRouter.get('/materials/:id/download', async (req: Request, res: Response) => {
+  const material = await authorizeMaterial(req, res, req.params.id, 'READ');
   if (!material) return;
 
   const rawFilename = material.file_path;
@@ -980,21 +1382,15 @@ apiRouter.get('/materials/:id/download', (req: Request, res: Response) => {
 });
 
 // Document reader content retrieval
-apiRouter.get('/documents/:id/content', (req: Request, res: Response) => {
+apiRouter.get('/documents/:id/content', async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
-  const state = db.getState();
-  const material = state.materials.find(m => m.id === req.params.id);
+  const material = await repositories().materials.findById(req.params.id);
   if (!material) return res.status(404).json({ error: 'Document not found' });
 
-  const matAuth = canAccessMaterial(user, material, 'READ');
+  const matAuth = await canAccessMaterial(user, material, 'READ');
   if (!matAuth.allowed) {
-    db.logAudit(
-      user.id,
-      'VERIFY',
-      'SECURITY_BOLA',
-      material.id,
-      `BOLA Denied: ${user.name} denied access to document "${material.title}"`
-    );
+    await writeAudit(user, 'VERIFY', 'SECURITY_BOLA', material.id,
+      `BOLA Denied: ${user.name} denied access to document "${material.title}"`, req.ip);
     return res.status(403).json({
       error: 'Access denied: You do not have permission to view this document',
       code: 'OBJECT_ACCESS_DENIED',
@@ -1031,24 +1427,22 @@ apiRouter.get('/documents/:id/content', (req: Request, res: Response) => {
 });
 
 // Reading progress
-apiRouter.get('/documents/:id/progress', (req: Request, res: Response) => {
-  const material = authorizeMaterial(req, res, req.params.id, 'READ');
+apiRouter.get('/documents/:id/progress', async (req: Request, res: Response) => {
+  const material = await authorizeMaterial(req, res, req.params.id, 'READ');
   if (!material) return;
 
   const user = getCurrentUser(req);
-  const state = db.getState();
-  const prog = state.reading_progress.find(rp => rp.material_id === req.params.id && rp.user_id === user.id);
+  const prog = await repositories().materials.getReadingProgress(user.id, req.params.id);
   res.json({ progress: prog || null });
 });
 
-apiRouter.post('/documents/:id/progress', requirePermission('USE'), (req: Request, res: Response) => {
-  const material = authorizeMaterial(req, res, req.params.id, 'READ');
+apiRouter.post('/documents/:id/progress', requirePermission('USE'), async (req: Request, res: Response) => {
+  const material = await authorizeMaterial(req, res, req.params.id, 'READ');
   if (!material) return;
 
   const user = getCurrentUser(req);
   const { last_page, total_pages, scroll_position } = req.body;
-  const state = db.getState();
-  let prog = state.reading_progress.find(rp => rp.material_id === req.params.id && rp.user_id === user.id);
+  let prog = await repositories().materials.getReadingProgress(user.id, req.params.id);
 
   if (!prog) {
     prog = {
@@ -1061,7 +1455,6 @@ apiRouter.post('/documents/:id/progress', requirePermission('USE'), (req: Reques
       scroll_position: Number(scroll_position) || 0,
       last_accessed: new Date().toISOString()
     };
-    state.reading_progress.push(prog);
   } else {
     prog.last_page = Number(last_page) || prog.last_page;
     prog.total_pages = Number(total_pages) || prog.total_pages;
@@ -1069,29 +1462,30 @@ apiRouter.post('/documents/:id/progress', requirePermission('USE'), (req: Reques
     prog.scroll_position = Number(scroll_position) || prog.scroll_position;
     prog.last_accessed = new Date().toISOString();
   }
-  db.save();
+  prog = await repositories().materials.saveReadingProgress(prog);
   res.json({ progress: prog });
 });
 
 // Bookmarks (Isolated to user)
-apiRouter.get('/materials/:id/bookmarks', (req: Request, res: Response) => {
-  const material = authorizeMaterial(req, res, req.params.id, 'READ');
+apiRouter.get('/materials/:id/bookmarks', async (req: Request, res: Response) => {
+  const material = await authorizeMaterial(req, res, req.params.id, 'READ');
   if (!material) return;
 
   const user = getCurrentUser(req);
-  const state = db.getState();
   const isAdmin = hasPermission(user, 'ADMIN');
-  const list = state.bookmarks.filter(b => b.material_id === req.params.id && (isAdmin || b.user_id === user.id));
+  const allBookmarks = isAdmin
+    ? await repositories().materials.getAllBookmarks(req.params.id)
+    : await repositories().materials.getBookmarks(user.id, req.params.id);
+  const list = allBookmarks.filter(bookmark => isAdmin || bookmark.user_id === user.id);
   res.json({ bookmarks: list });
 });
 
-apiRouter.post('/materials/:id/bookmarks', requirePermission('CREATE'), (req: Request, res: Response) => {
-  const material = authorizeMaterial(req, res, req.params.id, 'READ');
+apiRouter.post('/materials/:id/bookmarks', requirePermission('CREATE'), async (req: Request, res: Response) => {
+  const material = await authorizeMaterial(req, res, req.params.id, 'READ');
   if (!material) return;
 
   const user = getCurrentUser(req);
   const { page, title } = req.body;
-  const state = db.getState();
   const bm = {
     id: `bm_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
     user_id: user.id, // Immunized against parameter tampering
@@ -1100,32 +1494,32 @@ apiRouter.post('/materials/:id/bookmarks', requirePermission('CREATE'), (req: Re
     title: title || `Page ${page}`,
     created_at: new Date().toISOString()
   };
-  state.bookmarks.push(bm);
-  db.save();
-  res.status(201).json({ bookmark: bm });
+  const bookmark = await repositories().materials.saveBookmark(bm);
+  res.status(201).json({ bookmark });
 });
 
 // Highlights (Isolated to user)
-apiRouter.get('/materials/:id/highlights', (req: Request, res: Response) => {
-  const material = authorizeMaterial(req, res, req.params.id, 'READ');
+apiRouter.get('/materials/:id/highlights', async (req: Request, res: Response) => {
+  const material = await authorizeMaterial(req, res, req.params.id, 'READ');
   if (!material) return;
 
   const user = getCurrentUser(req);
-  const state = db.getState();
   const isAdmin = hasPermission(user, 'ADMIN');
-  const list = state.highlights.filter(h => h.material_id === req.params.id && (isAdmin || h.user_id === user.id));
+  const allHighlights = isAdmin
+    ? await repositories().materials.getAllHighlights(req.params.id)
+    : await repositories().materials.getHighlights(user.id, req.params.id);
+  const list = allHighlights.filter(highlight => isAdmin || highlight.user_id === user.id);
   res.json({ highlights: list });
 });
 
-apiRouter.post('/materials/:id/highlights', requirePermission('CREATE'), (req: Request, res: Response) => {
-  const material = authorizeMaterial(req, res, req.params.id, 'READ');
+apiRouter.post('/materials/:id/highlights', requirePermission('CREATE'), async (req: Request, res: Response) => {
+  const material = await authorizeMaterial(req, res, req.params.id, 'READ');
   if (!material) return;
 
   const user = getCurrentUser(req);
   const { page, selected_text, color = 'yellow', location_meta } = req.body;
   if (!selected_text) return res.status(400).json({ error: 'Selected text is required' });
 
-  const state = db.getState();
   const hl = {
     id: `hl_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
     user_id: user.id, // Immunized against parameter tampering
@@ -1136,25 +1530,25 @@ apiRouter.post('/materials/:id/highlights', requirePermission('CREATE'), (req: R
     location_meta,
     created_at: new Date().toISOString()
   };
-  state.highlights.push(hl);
-  db.save();
-  res.status(201).json({ highlight: hl });
+  const highlight = await repositories().materials.saveHighlight(hl);
+  res.status(201).json({ highlight });
 });
 
 // Notes (Traceable to material, page, project, calculation, dataset with object isolation)
-apiRouter.get('/notes', (req: Request, res: Response) => {
+apiRouter.get('/notes', async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { material_id, project_id, dataset_id, calculation_id } = req.query;
-  const state = db.getState();
-
   // If filtering by project, verify user has READ access to the project
   if (project_id) {
-    const proj = authorizeProject(req, res, String(project_id), 'READ');
+    const proj = await authorizeProject(req, res, String(project_id), 'READ');
     if (!proj) return;
   }
 
   // Filter notes to those the user owns or can access via shared project
-  let list = state.notes.filter(n => canAccessNote(user, n, 'READ').allowed);
+  let list = await repositories().materials.getAllNotes();
+  list = (await Promise.all(list.map(async note =>
+    (await canAccessNote(user, note, 'READ')).allowed ? note : null
+  ))).filter((note): note is Note => note !== null);
 
   if (material_id) list = list.filter(n => n.material_id === String(material_id));
   if (project_id) list = list.filter(n => n.project_id === String(project_id));
@@ -1164,18 +1558,17 @@ apiRouter.get('/notes', (req: Request, res: Response) => {
   res.json({ notes: list });
 });
 
-apiRouter.post('/notes', requirePermission('CREATE'), (req: Request, res: Response) => {
+apiRouter.post('/notes', requirePermission('CREATE'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { title, content, material_id, page, selected_text, project_id, dataset_id, calculation_id } = req.body;
   if (!content) return res.status(400).json({ error: 'Note content is required' });
 
   // If attaching to a project, verify write authorization on the project
   if (project_id) {
-    const proj = authorizeProject(req, res, String(project_id), 'WRITE');
+    const proj = await authorizeProject(req, res, String(project_id), 'WRITE');
     if (!proj) return;
   }
 
-  const state = db.getState();
   const note = {
     id: `note_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
     user_id: user.id, // Strictly server-assigned
@@ -1190,26 +1583,20 @@ apiRouter.post('/notes', requirePermission('CREATE'), (req: Request, res: Respon
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString()
   };
-  state.notes.push(note);
-  db.logAudit(user.id, 'CREATE', 'NOTE', note.id, `Created note "${note.title}" with source provenance`);
-  res.status(201).json({ note });
+  const savedNote = await repositories().materials.saveNote(note);
+  await writeAudit(user, 'CREATE', 'NOTE', note.id, `Created note "${note.title}" with source provenance`, req.ip);
+  res.status(201).json({ note: savedNote });
 });
 
-apiRouter.put('/notes/:id', requirePermission('EDIT'), (req: Request, res: Response) => {
+apiRouter.put('/notes/:id', requirePermission('EDIT'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
-  const state = db.getState();
-  const note = state.notes.find(n => n.id === req.params.id);
+  const note = (await repositories().materials.getAllNotes()).find(candidate => candidate.id === req.params.id);
   if (!note) return res.status(404).json({ error: 'Note not found' });
 
-  const authRes = canAccessNote(user, note, 'WRITE');
+  const authRes = await canAccessNote(user, note, 'WRITE');
   if (!authRes.allowed) {
-    db.logAudit(
-      user.id,
-      'VERIFY',
-      'SECURITY_BOLA',
-      note.id,
-      `BOLA Denied: ${user.name} denied EDIT on note "${note.id}"`
-    );
+    await writeAudit(user, 'VERIFY', 'SECURITY_BOLA', note.id,
+      `BOLA Denied: ${user.name} denied EDIT on note "${note.id}"`, req.ip);
     return res.status(403).json({
       error: 'Access denied: You do not have permission to edit this note',
       code: 'OBJECT_ACCESS_DENIED',
@@ -1222,27 +1609,19 @@ apiRouter.put('/notes/:id', requirePermission('EDIT'), (req: Request, res: Respo
   if (content !== undefined) note.content = content;
   note.updated_at = new Date().toISOString();
 
-  db.save();
-  db.logAudit(user.id, 'EDIT', 'NOTE', note.id, `Updated note "${note.title}"`);
-  res.json({ note });
+  const updatedNote = await repositories().materials.saveNote(note);
+  await writeAudit(user, 'EDIT', 'NOTE', note.id, `Updated note "${note.title}"`, req.ip);
+  res.json({ note: updatedNote });
 });
 
-apiRouter.delete('/notes/:id', (req: Request, res: Response) => {
+apiRouter.delete('/notes/:id', async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
-  const state = db.getState();
-  const idx = state.notes.findIndex(n => n.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Note not found' });
-
-  const note = state.notes[idx];
-  const authRes = canAccessNote(user, note, 'DELETE');
+  const note = (await repositories().materials.getAllNotes()).find(candidate => candidate.id === req.params.id);
+  if (!note) return res.status(404).json({ error: 'Note not found' });
+  const authRes = await canAccessNote(user, note, 'DELETE');
   if (!authRes.allowed) {
-    db.logAudit(
-      user.id,
-      'VERIFY',
-      'SECURITY_BOLA',
-      note.id,
-      `BOLA Denied: ${user.name} denied DELETE on note "${note.id}"`
-    );
+    await writeAudit(user, 'VERIFY', 'SECURITY_BOLA', note.id,
+      `BOLA Denied: ${user.name} denied DELETE on note "${note.id}"`, req.ip);
     return res.status(403).json({
       error: 'Access denied: You do not have permission to delete this note',
       code: 'OBJECT_ACCESS_DENIED',
@@ -1250,24 +1629,23 @@ apiRouter.delete('/notes/:id', (req: Request, res: Response) => {
     });
   }
 
-  state.notes.splice(idx, 1);
-  db.save();
-  db.logAudit(user.id, 'DELETE', 'NOTE', note.id, `Deleted note "${note.title}"`);
+  await repositories().materials.deleteNote(note.id);
+  await writeAudit(user, 'DELETE', 'NOTE', note.id, `Deleted note "${note.title}"`, req.ip);
   res.json({ success: true, message: 'Note deleted' });
 });
 
 // ----------------------------------------------------
 // 4. SCIENTIFIC REGISTRY (Variables, Units, Formulas, Algorithms, Models, Parameters, References)
 // ----------------------------------------------------
-apiRouter.get('/units', (req: Request, res: Response) => {
-  res.json({ units: STANDARD_UNITS });
+apiRouter.get('/units', async (req: Request, res: Response) => {
+  res.json({ units: await repositories().scientificRegistry.getUnits() });
 });
 
-apiRouter.get('/variables', (req: Request, res: Response) => {
-  res.json({ variables: db.getState().variables });
+apiRouter.get('/variables', async (req: Request, res: Response) => {
+  res.json({ variables: await repositories().scientificRegistry.getVariables() });
 });
 
-apiRouter.post('/variables', requirePermission('PUBLISH'), (req: Request, res: Response) => {
+apiRouter.post('/variables', requirePermission('PUBLISH'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { variable_id, name, label, definition, datatype, unit, measurement_type, allowed_range, population } = req.body;
 
@@ -1291,17 +1669,16 @@ apiRouter.post('/variables', requirePermission('PUBLISH'), (req: Request, res: R
     updated_at: new Date().toISOString()
   };
 
-  const state = db.getState();
-  state.variables.push(v);
-  db.logAudit(user.id, 'CREATE', 'VARIABLE', v.variable_id, `Registered variable "${v.name}"`);
-  res.status(201).json({ variable: v });
+  const variable = await repositories().scientificRegistry.createVariable(v);
+  await writeAudit(user, 'CREATE', 'VARIABLE', v.variable_id, `Registered variable "${v.name}"`, req.ip);
+  res.status(201).json({ variable });
 });
 
-apiRouter.get('/parameters', (req: Request, res: Response) => {
-  res.json({ parameters: db.getState().parameters });
+apiRouter.get('/parameters', async (req: Request, res: Response) => {
+  res.json({ parameters: await repositories().scientificRegistry.getParameters() });
 });
 
-apiRouter.post('/parameters', requirePermission('PUBLISH'), (req: Request, res: Response) => {
+apiRouter.post('/parameters', requirePermission('PUBLISH'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { parameter_id, name, description, value, unit, valid_range, is_constant } = req.body;
 
@@ -1324,34 +1701,34 @@ apiRouter.post('/parameters', requirePermission('PUBLISH'), (req: Request, res: 
     updated_at: new Date().toISOString()
   };
 
-  const state = db.getState();
-  state.parameters.push(p);
-  db.logAudit(user.id, 'CREATE', 'PARAMETER', p.parameter_id, `Registered parameter "${p.name}"`);
-  res.status(201).json({ parameter: p });
+  const parameter = await repositories().scientificRegistry.createParameter(p);
+  await writeAudit(user, 'CREATE', 'PARAMETER', p.parameter_id, `Registered parameter "${p.name}"`, req.ip);
+  res.status(201).json({ parameter });
 });
 
-apiRouter.get('/interpretations', (req: Request, res: Response) => {
+apiRouter.get('/interpretations', async (req: Request, res: Response) => {
   const target = req.query.target as string;
-  let rules = db.getState().interpretation_rules || [];
+  let rules = await repositories().scientificRegistry.getInterpretationRules();
   if (target) {
     rules = rules.filter(r => r.target_variable_or_metric === target);
   }
   res.json({ interpretation_rules: rules });
 });
 
-apiRouter.get('/interpretations/:id', (req: Request, res: Response) => {
-  const rule = (db.getState().interpretation_rules || []).find(r => r.rule_id === req.params.id || r.module_id === req.params.id);
+apiRouter.get('/interpretations/:id', async (req: Request, res: Response) => {
+  const rule = (await repositories().scientificRegistry.getInterpretationRules())
+    .find(r => r.rule_id === req.params.id || r.module_id === req.params.id);
   if (!rule) {
     return res.status(404).json({ error: 'Interpretation rule not found' });
   }
   res.json({ interpretation_rule: rule });
 });
 
-apiRouter.get('/formulas', (req: Request, res: Response) => {
-  res.json({ formulas: db.getState().formulas });
+apiRouter.get('/formulas', async (req: Request, res: Response) => {
+  res.json({ formulas: await repositories().scientificRegistry.getFormulas() });
 });
 
-apiRouter.post('/formulas', requirePermission('PUBLISH'), (req: Request, res: Response) => {
+apiRouter.post('/formulas', requirePermission('PUBLISH'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { 
     formula_id, 
@@ -1391,21 +1768,19 @@ apiRouter.post('/formulas', requirePermission('PUBLISH'), (req: Request, res: Re
     updated_at: new Date().toISOString()
   };
 
-  const state = db.getState();
-  state.formulas.push(formula);
-  db.logAudit(user.id, 'CREATE', 'FORMULA', formula.formula_id, `Registered formula "${formula.name}"`);
-  res.status(201).json({ formula });
+  const savedFormula = await repositories().scientificRegistry.createFormula(formula);
+  await writeAudit(user, 'CREATE', 'FORMULA', formula.formula_id, `Registered formula "${formula.name}"`, req.ip);
+  res.status(201).json({ formula: savedFormula });
 });
 
-apiRouter.get('/models', (req: Request, res: Response) => {
-  res.json({ models: db.getState().models });
+apiRouter.get('/models', async (req: Request, res: Response) => {
+  res.json({ models: await repositories().scientificRegistry.getModels() });
 });
 
 // Model cloning: Section 24 (Verified Model -> Clone -> Experimental Model)
-apiRouter.post('/models/:id/clone', requirePermission('CLONE'), (req: Request, res: Response) => {
+apiRouter.post('/models/:id/clone', requirePermission('CLONE'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
-  const state = db.getState();
-  const parentModel = state.models.find(m => m.model_id === req.params.id);
+  const parentModel = await repositories().scientificRegistry.getModelById(req.params.id);
   if (!parentModel) return res.status(404).json({ error: 'Parent model not found' });
 
   const { new_name, changed_notes } = req.body;
@@ -1431,16 +1806,16 @@ apiRouter.post('/models/:id/clone', requirePermission('CLONE'), (req: Request, r
     updated_at: new Date().toISOString()
   };
 
-  state.models.push(experimentalModel);
-  db.logAudit(user.id, 'CLONE', 'MODEL', experimentalModel.model_id, `Cloned experimental model from ${parentModel.model_id}`);
-  res.status(201).json({ model: experimentalModel });
+  const model = await repositories().scientificRegistry.createModel(experimentalModel);
+  await writeAudit(user, 'CLONE', 'MODEL', experimentalModel.model_id, `Cloned experimental model from ${parentModel.model_id}`, req.ip);
+  res.status(201).json({ model });
 });
 
-apiRouter.get('/references', (req: Request, res: Response) => {
-  res.json({ references: db.getState().references });
+apiRouter.get('/references', async (req: Request, res: Response) => {
+  res.json({ references: await repositories().scientificRegistry.getReferences() });
 });
 
-apiRouter.post('/references', requirePermission('PUBLISH'), (req: Request, res: Response) => {
+apiRouter.post('/references', requirePermission('PUBLISH'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { title, authors, year, journal_or_publisher, doi, citation_key, abstract } = req.body;
   if (!title) return res.status(400).json({ error: 'Title is required' });
@@ -1457,16 +1832,15 @@ apiRouter.post('/references', requirePermission('PUBLISH'), (req: Request, res: 
     created_at: new Date().toISOString()
   };
 
-  const state = db.getState();
-  state.references.push(ref);
-  db.logAudit(user.id, 'CREATE', 'REFERENCE', ref.reference_id, `Added reference "${ref.title}"`);
-  res.status(201).json({ reference: ref });
+  const reference = await repositories().scientificRegistry.createReference(ref);
+  await writeAudit(user, 'CREATE', 'REFERENCE', ref.reference_id, `Added reference "${ref.title}"`, req.ip);
+  res.status(201).json({ reference });
 });
 
 // ----------------------------------------------------
 // 5. CALCULATION ENGINE & TRACE (Sections 25, 26, 27)
 // ----------------------------------------------------
-apiRouter.post('/calculations/execute', requirePermission('USE'), (req: Request, res: Response) => {
+apiRouter.post('/calculations/execute', requirePermission('USE'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { formula_id, inputs, parameter_overrides, project_id } = req.body;
 
@@ -1476,19 +1850,18 @@ apiRouter.post('/calculations/execute', requirePermission('USE'), (req: Request,
 
   // If a project is specified, verify access to it
   if (project_id) {
-    const proj = authorizeProject(req, res, String(project_id), 'READ');
+    const proj = await authorizeProject(req, res, String(project_id), 'READ');
     if (!proj) return;
   }
 
-  const state = db.getState();
-  const formula = state.formulas.find(f => f.formula_id === formula_id);
+  const formula = await repositories().scientificRegistry.getFormulaById(formula_id);
   if (!formula) {
     return res.status(404).json({ error: `Formula "${formula_id}" not found in scientific registry.` });
   }
 
   // Construct parameter dictionary with overrides
   const paramMap: Record<string, ScientificParameter> = {};
-  for (const p of state.parameters) {
+  for (const p of await repositories().scientificRegistry.getParameters()) {
     paramMap[p.parameter_id] = { ...p };
   }
   if (parameter_overrides && typeof parameter_overrides === 'object') {
@@ -1505,12 +1878,13 @@ apiRouter.post('/calculations/execute', requirePermission('USE'), (req: Request,
 
   // Variable dictionary
   const varMap: Record<string, ScientificVariable> = {};
-  for (const v of state.variables) {
+  for (const v of await repositories().scientificRegistry.getVariables()) {
     varMap[v.variable_id] = v;
   }
 
+  let trace;
   try {
-    const trace = CalculationEngine.executeFormula({
+    trace = CalculationEngine.executeFormula({
       formula,
       inputs: inputs || {},
       parameters: paramMap,
@@ -1523,53 +1897,47 @@ apiRouter.post('/calculations/execute', requirePermission('USE'), (req: Request,
       trace.project_id = String(project_id);
     }
 
-    state.calculations.unshift(trace);
-    db.logAudit(
-      user.id, 
-      'EXECUTE', 
-      'FORMULA', 
-      formula.formula_id, 
-      `Executed formula "${formula.name}". Result: ${JSON.stringify(trace.final_result)}`
-    );
-
-    res.json({ trace });
   } catch (err: any) {
     return res.status(400).json({ error: err.message || 'Calculation execution failed' });
   }
+  trace.user_id = user.id;
+  if (project_id) trace.project_id = String(project_id);
+  const savedTrace = await repositories().researchArtifacts.createCalculation(trace);
+  await writeAudit(user, 'EXECUTE', 'FORMULA', formula.formula_id,
+    `Executed formula "${formula.name}". Result: ${JSON.stringify(trace.final_result)}`, req.ip);
+  res.json({ trace: savedTrace });
 });
 
-apiRouter.get('/calculations', (req: Request, res: Response) => {
+apiRouter.get('/calculations', async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { project_id } = req.query;
-  const state = db.getState();
   const isAdmin = hasPermission(user, 'ADMIN');
 
   if (project_id) {
-    const proj = authorizeProject(req, res, String(project_id), 'READ');
+    const proj = await authorizeProject(req, res, String(project_id), 'READ');
     if (!proj) return;
-    const list = state.calculations.filter(c => c.project_id === String(project_id));
+    const list = await repositories().researchArtifacts.getCalculations(String(project_id));
     return res.json({ calculations: list });
   }
 
   // Filter calculations: user's own traces, admin, or project traces user has access to
-  const list = state.calculations.filter(c => {
-    if (isAdmin) return true;
-    if (c.user_id && c.user_id === user.id) return true;
-    if (c.project_id) {
-      const proj = state.projects.find(p => p.id === c.project_id);
-      return proj && canAccessProject(user, proj, 'READ').allowed;
+  const traces = await repositories().researchArtifacts.getCalculations();
+  const list = (await Promise.all(traces.map(async trace => {
+    if (isAdmin) return trace;
+    if (trace.user_id === user.id) return trace;
+    if (trace.project_id) {
+      const project = await repositories().projects.findById(trace.project_id);
+      if (project && (await canAccessProject(user, project, 'READ')).allowed) return trace;
     }
-    // Unattributed legacy/unassigned traces are NOT displayed to regular users
-    return false;
-  });
+    return null;
+  }))).filter((trace): trace is NonNullable<typeof trace> => trace !== null);
 
   res.json({ calculations: list });
 });
 
-apiRouter.get('/calculations/:id', (req: Request, res: Response) => {
+apiRouter.get('/calculations/:id', async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
-  const state = db.getState();
-  const trace = state.calculations.find(c => c.calculation_id === req.params.id);
+  const trace = await repositories().researchArtifacts.getCalculationById(req.params.id);
   if (!trace) return res.status(404).json({ error: 'Calculation trace not found' });
 
   const isAdmin = hasPermission(user, 'ADMIN');
@@ -1578,19 +1946,14 @@ apiRouter.get('/calculations/:id', (req: Request, res: Response) => {
   }
 
   if (trace.project_id) {
-    const proj = state.projects.find(p => p.id === trace.project_id);
-    if (proj && canAccessProject(user, proj, 'READ').allowed) {
+    const proj = await repositories().projects.findById(trace.project_id);
+    if (proj && (await canAccessProject(user, proj, 'READ')).allowed) {
       return res.json({ trace });
     }
   }
 
-  db.logAudit(
-    user.id,
-    'VERIFY',
-    'SECURITY_BOLA',
-    trace.calculation_id,
-    `BOLA Denied: ${user.name} denied access to private calculation trace "${trace.calculation_id}"`
-  );
+  await writeAudit(user, 'VERIFY', 'SECURITY_BOLA', trace.calculation_id,
+    `BOLA Denied: ${user.name} denied access to private calculation trace "${trace.calculation_id}"`, req.ip);
   return res.status(403).json({
     error: 'Access denied: You do not have permission to view this calculation trace',
     code: 'OBJECT_ACCESS_DENIED'
@@ -1601,46 +1964,45 @@ apiRouter.get('/calculations/:id', (req: Request, res: Response) => {
 // 6. DATA LAB (Sections 28, 29, 30, 31)
 // Raw protection, column detection, type inference, validation, versioning
 // ----------------------------------------------------
-apiRouter.get('/datasets', (req: Request, res: Response) => {
+apiRouter.get('/datasets', async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { project_id } = req.query;
-  const state = db.getState();
-
   if (project_id) {
-    const proj = authorizeProject(req, res, String(project_id), 'READ');
+    const proj = await authorizeProject(req, res, String(project_id), 'READ');
     if (!proj) return;
-    const datasets = state.datasets.filter(d => d.project_id === String(project_id));
+    const datasets = await repositories().datasets.listByProject(String(project_id));
     return res.json({ datasets });
   }
 
-  const list = state.datasets.filter(d => canAccessDataset(user, d, 'READ').allowed);
+  const allDatasets = await repositories().datasets.listAll();
+  const list = (await Promise.all(allDatasets.map(async dataset =>
+    (await canAccessDataset(user, dataset, 'READ')).allowed ? dataset : null
+  ))).filter((dataset): dataset is Dataset => dataset !== null);
   res.json({ datasets: list });
 });
 
-apiRouter.get('/datasets/:id', (req: Request, res: Response) => {
-  const dataset = authorizeDataset(req, res, req.params.id, 'READ');
+apiRouter.get('/datasets/:id', async (req: Request, res: Response) => {
+  const dataset = await authorizeDataset(req, res, req.params.id, 'READ');
   if (!dataset) return;
   res.json({ dataset });
 });
 
-apiRouter.get('/datasets/:id/versions', (req: Request, res: Response) => {
-  const dataset = authorizeDataset(req, res, req.params.id, 'READ');
+apiRouter.get('/datasets/:id/versions', async (req: Request, res: Response) => {
+  const dataset = await authorizeDataset(req, res, req.params.id, 'READ');
   if (!dataset) return;
 
-  const state = db.getState();
-  const versions = state.dataset_versions.filter(v => v.dataset_id === dataset.id);
+  const versions = await repositories().datasets.listVersions(dataset.id);
   res.json({ versions });
 });
 
-apiRouter.post('/datasets/import', requirePermission('CREATE'), (req: Request, res: Response) => {
+apiRouter.post('/datasets/import', requirePermission('CREATE'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { project_id, name, description, raw_data, csv_text } = req.body;
 
   if (!name) return res.status(400).json({ error: 'Dataset name is required' });
 
-  const state = db.getState();
   const targetProjectId = project_id || 'proj_metabolic_v1';
-  const targetProject = authorizeProject(req, res, targetProjectId, 'WRITE');
+  const targetProject = await authorizeProject(req, res, targetProjectId, 'WRITE');
   if (!targetProject) return;
 
   let rows: Record<string, any>[] = [];
@@ -1732,37 +2094,32 @@ apiRouter.post('/datasets/import', requirePermission('CREATE'), (req: Request, r
     created_at: new Date().toISOString()
   };
 
-  state.datasets.unshift(newDataset);
-  state.dataset_versions.unshift(initialVersion);
-  db.logAudit(user.id, 'CREATE', 'DATASET', newDataset.id, `Imported dataset "${newDataset.name}" (v1.0 RAW)`);
-
-  res.status(201).json({ dataset: newDataset, version: initialVersion });
+  const created = await repositories().unitOfWork.runInTransaction(async tx => ({
+    dataset: await repositories().datasets.create(newDataset, tx),
+    version: await repositories().datasets.createVersion(initialVersion, tx)
+  }));
+  await writeAudit(user, 'CREATE', 'DATASET', newDataset.id, `Imported dataset "${newDataset.name}" (v1.0 RAW)`, req.ip);
+  res.status(201).json(created);
 });
 
 // Transformation & Version Creation (Section 31)
-apiRouter.post('/datasets/:id/transform', requirePermission('EDIT'), (req: Request, res: Response) => {
+apiRouter.post('/datasets/:id/transform', requirePermission('EDIT'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { source_version_id, transformation_type, config } = req.body;
-  const state = db.getState();
-  const dataset = authorizeDataset(req, res, req.params.id, 'WRITE');
+  const dataset = await authorizeDataset(req, res, req.params.id, 'WRITE');
   if (!dataset) return;
 
   if (!source_version_id) {
     return res.status(400).json({ error: 'source_version_id is required' });
   }
 
-  const parentVersion = state.dataset_versions.find(v => v.id === source_version_id);
+  const parentVersion = await repositories().datasets.getVersion(source_version_id);
   if (!parentVersion) return res.status(404).json({ error: 'Source version not found', code: 'VERSION_NOT_FOUND' });
 
   // Cross-dataset version IDOR check: Version must strictly belong to target dataset
   if (parentVersion.dataset_id !== dataset.id) {
-    db.logAudit(
-      user.id,
-      'VERIFY',
-      'SECURITY_BOLA',
-      dataset.id,
-      `BOLA Denied: Version "${source_version_id}" does not belong to target dataset "${dataset.id}"`
-    );
+    await writeAudit(user, 'VERIFY', 'SECURITY_BOLA', dataset.id,
+      `BOLA Denied: Version "${source_version_id}" does not belong to target dataset "${dataset.id}"`, req.ip);
     return res.status(400).json({
       error: 'Invalid source version: Version does not belong to the target dataset',
       code: 'INVALID_PARENT_VERSION'
@@ -1802,7 +2159,7 @@ apiRouter.post('/datasets/:id/transform', requirePermission('EDIT'), (req: Reque
     transDescription = `Computed column "${new_column}" from "${source_col}"`;
   }
 
-  const nextTag = `v1.${state.dataset_versions.filter(v => v.dataset_id === dataset.id).length}`;
+  const nextTag = `v1.${(await repositories().datasets.listVersions(dataset.id)).length}`;
   const newVersion: DatasetVersion = {
     id: `dsv_${Date.now()}_${nextTag.replace('.', '_')}`,
     dataset_id: dataset.id,
@@ -1821,38 +2178,33 @@ apiRouter.post('/datasets/:id/transform', requirePermission('EDIT'), (req: Reque
     created_at: new Date().toISOString()
   };
 
-  dataset.current_version = nextTag;
-  dataset.updated_at = new Date().toISOString();
-  state.dataset_versions.unshift(newVersion);
-  db.logAudit(user.id, 'EDIT', 'DATASET', dataset.id, `Created dataset version ${nextTag}: ${transDescription}`);
-
-  res.status(201).json({ version: newVersion });
+  const result = await repositories().unitOfWork.runInTransaction(async tx => {
+    const version = await repositories().datasets.createVersion(newVersion, tx);
+    const updatedDataset = await repositories().datasets.update(dataset.id, { current_version: nextTag }, tx);
+    return { version, updatedDataset };
+  });
+  await writeAudit(user, 'EDIT', 'DATASET', dataset.id, `Created dataset version ${nextTag}: ${transDescription}`, req.ip);
+  res.status(201).json({ version: result.version });
 });
 
 // ----------------------------------------------------
 // 7. STATISTICS LAB (Section 32)
 // Descriptive, Comparison, Association, Diagnostics
 // ----------------------------------------------------
-apiRouter.post('/statistics/run', requirePermission('USE'), (req: Request, res: Response) => {
+apiRouter.post('/statistics/run', requirePermission('USE'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { project_id, dataset_version_id, analysis_type, target_columns, grouping_column, title } = req.body;
 
-  const state = db.getState();
-  const dsv = state.dataset_versions.find(v => v.id === dataset_version_id);
+  const dsv = await repositories().datasets.getVersion(dataset_version_id);
   if (!dsv) return res.status(404).json({ error: 'Dataset version not found' });
 
   // Verify access to dataset
-  const dataset = state.datasets.find(d => d.id === dsv.dataset_id);
+  const dataset = await repositories().datasets.findById(dsv.dataset_id);
   if (dataset) {
-    const dsAuth = canAccessDataset(user, dataset, 'READ');
+    const dsAuth = await canAccessDataset(user, dataset, 'READ');
     if (!dsAuth.allowed) {
-      db.logAudit(
-        user.id,
-        'VERIFY',
-        'SECURITY_BOLA',
-        dataset.id,
-        `BOLA Denied: ${user.name} denied running statistics on unauthorized dataset "${dataset.id}"`
-      );
+      await writeAudit(user, 'VERIFY', 'SECURITY_BOLA', dataset.id,
+        `BOLA Denied: ${user.name} denied running statistics on unauthorized dataset "${dataset.id}"`, req.ip);
       return res.status(403).json({
         error: 'Access denied: You do not have permission to analyze this dataset',
         code: 'OBJECT_ACCESS_DENIED'
@@ -1863,13 +2215,16 @@ apiRouter.post('/statistics/run', requirePermission('USE'), (req: Request, res: 
   // 2. Resolve destination project and strictly verify WRITE authorization
   let targetProj: any = null;
   if (project_id) {
-    targetProj = authorizeProject(req, res, String(project_id), 'WRITE');
+    targetProj = await authorizeProject(req, res, String(project_id), 'WRITE');
     if (!targetProj) return;
   } else if (dataset?.project_id) {
-    targetProj = authorizeProject(req, res, dataset.project_id, 'WRITE');
+    targetProj = await authorizeProject(req, res, dataset.project_id, 'WRITE');
     if (!targetProj) return;
   } else {
-    const writableProjects = state.projects.filter(p => canAccessProject(user, p, 'WRITE').allowed);
+    const allProjects = await repositories().projects.listAll();
+    const writableProjects = (await Promise.all(allProjects.map(async project =>
+      (await canAccessProject(user, project, 'WRITE')).allowed ? project : null
+    ))).filter((project): project is Project => project !== null);
     if (writableProjects.length > 0) {
       targetProj = writableProjects[0];
     } else {
@@ -1985,31 +2340,29 @@ apiRouter.post('/statistics/run', requirePermission('USE'), (req: Request, res: 
     created_at: new Date().toISOString()
   };
 
-  state.statistics_analyses.unshift(analysis);
-  db.logAudit(user.id, 'CREATE', 'STATISTICS', analysis.id, `Ran ${analysis_type} on dataset ${dataset_version_id}`);
+  const savedAnalysis = await repositories().researchArtifacts.createAnalysis(analysis);
+  await writeAudit(user, 'CREATE', 'STATISTICS', analysis.id, `Ran ${analysis_type} on dataset ${dataset_version_id}`, req.ip);
 
-  res.status(201).json({ analysis });
+  res.status(201).json({ analysis: savedAnalysis });
 });
 
-apiRouter.get('/statistics', (req: Request, res: Response) => {
+apiRouter.get('/statistics', async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { dataset_version_id, project_id } = req.query;
-  const state = db.getState();
-
   if (project_id) {
-    const proj = authorizeProject(req, res, String(project_id), 'READ');
+    const proj = await authorizeProject(req, res, String(project_id), 'READ');
     if (!proj) return;
   }
 
-  let list = state.statistics_analyses;
+  let list = await repositories().researchArtifacts.getAllAnalyses();
   if (dataset_version_id) list = list.filter(s => s.dataset_version_id === String(dataset_version_id));
   if (project_id) {
     list = list.filter(s => s.project_id === String(project_id));
   } else {
-    list = list.filter(s => {
-      const proj = state.projects.find(p => p.id === s.project_id);
-      return !proj || canAccessProject(user, proj, 'READ').allowed;
-    });
+    list = (await Promise.all(list.map(async analysis => {
+      const proj = await repositories().projects.findById(analysis.project_id);
+      return !proj || (await canAccessProject(user, proj, 'READ')).allowed ? analysis : null;
+    }))).filter((analysis): analysis is StatisticsAnalysis => analysis !== null);
   }
   res.json({ analyses: list });
 });
@@ -2017,14 +2370,14 @@ apiRouter.get('/statistics', (req: Request, res: Response) => {
 /// ----------------------------------------------------
 // 8. CODE LAB & GUI-TO-CODE BRIDGE (Sections 34, 35)
 // ----------------------------------------------------
-apiRouter.post('/code/execute', requirePermission('USE'), (req: Request, res: Response) => {
+apiRouter.post('/code/execute', requirePermission('USE'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { language = 'PYTHON', code, project_id, variables } = req.body || {};
 
   if (project_id) {
-    const existingProj = db.getState().projects.find(p => p.id === String(project_id));
+    const existingProj = await repositories().projects.findById(String(project_id));
     if (existingProj) {
-      const proj = authorizeProject(req, res, String(project_id), 'READ');
+      const proj = await authorizeProject(req, res, String(project_id), 'READ');
       if (!proj) return;
     }
   }
@@ -2125,18 +2478,18 @@ apiRouter.post('/code/execute', requirePermission('USE'), (req: Request, res: Re
     created_at: new Date().toISOString()
   };
 
-  const state = db.getState();
-  state.code_executions.unshift(record);
-  db.logAudit(user.id, 'EXECUTE', 'CODE', record.id, `Executed ${language} code (${status})`);
+  const savedRecord = await repositories().researchArtifacts.createCodeExecution(record);
+  await writeAudit(user, 'EXECUTE', 'CODE', record.id, `Executed ${language} code (${status})`, req.ip);
 
-  res.json({ result: record });
+  res.json({ result: savedRecord });
 });
 
 // GUI to Code Bridge Generator (Section 35)
-apiRouter.post('/code/generate-from-gui', requirePermission('USE'), (req: Request, res: Response) => {
+apiRouter.post('/code/generate-from-gui', requirePermission('USE'), async (req: Request, res: Response) => {
   const { operation, target_formula_id, dataset_version_id, parameters } = req.body;
-  const state = db.getState();
-  const formula = state.formulas.find(f => f.formula_id === target_formula_id);
+  const formula = target_formula_id
+    ? await repositories().scientificRegistry.getFormulaById(target_formula_id)
+    : null;
 
   let pythonCode = '';
   let rCode = '';
@@ -2185,41 +2538,40 @@ summary(df)`;
 // ----------------------------------------------------
 // 9. NUTRINOTEBOOK (Section 36)
 // ----------------------------------------------------
-apiRouter.get('/notebooks', (req: Request, res: Response) => {
+apiRouter.get('/notebooks', async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { project_id } = req.query;
-  const state = db.getState();
 
   if (project_id) {
-    const proj = authorizeProject(req, res, String(project_id), 'READ');
+    const proj = await authorizeProject(req, res, String(project_id), 'READ');
     if (!proj) return;
-    const notebooks = state.notebooks.filter(nb => nb.project_id === String(project_id));
+    const notebooks = await repositories().researchArtifacts.getNotebooksByProject(String(project_id));
     return res.json({ notebooks });
   }
 
-  const list = state.notebooks.filter(nb => canAccessNotebook(user, nb, 'READ').allowed);
+  const allNotebooks = await repositories().researchArtifacts.getAllNotebooks();
+  const list = (await Promise.all(allNotebooks.map(async notebook =>
+    (await canAccessNotebook(user, notebook, 'READ')).allowed ? notebook : null
+  ))).filter((notebook): notebook is NutriNotebook => notebook !== null);
   res.json({ notebooks: list });
 });
 
-apiRouter.get('/notebooks/:id', (req: Request, res: Response) => {
-  const notebook = authorizeNotebook(req, res, req.params.id, 'READ');
+apiRouter.get('/notebooks/:id', async (req: Request, res: Response) => {
+  const notebook = await authorizeNotebook(req, res, req.params.id, 'READ');
   if (!notebook) return;
 
-  const state = db.getState();
-  const cells = state.notebook_cells
-    .filter(c => c.notebook_id === notebook.id)
+  const cells = (await repositories().researchArtifacts.getNotebookCells(notebook.id))
     .sort((a, b) => a.order - b.order);
   res.json({ notebook, cells });
 });
 
-apiRouter.post('/notebooks/:id/cells', requirePermission('CREATE'), (req: Request, res: Response) => {
+apiRouter.post('/notebooks/:id/cells', requirePermission('CREATE'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
-  const notebook = authorizeNotebook(req, res, req.params.id, 'WRITE');
+  const notebook = await authorizeNotebook(req, res, req.params.id, 'WRITE');
   if (!notebook) return;
 
   const { cell_type, title, content, metadata } = req.body;
-  const state = db.getState();
-  const existingCells = state.notebook_cells.filter(c => c.notebook_id === req.params.id);
+  const existingCells = await repositories().researchArtifacts.getNotebookCells(req.params.id);
   const newCell: NotebookCell = {
     id: `cell_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
     notebook_id: req.params.id,
@@ -2230,27 +2582,21 @@ apiRouter.post('/notebooks/:id/cells', requirePermission('CREATE'), (req: Reques
     metadata: metadata || {}
   };
 
-  state.notebook_cells.push(newCell);
-  db.logAudit(user.id, 'CREATE', 'NOTEBOOK_CELL', newCell.id, `Added cell to notebook ${req.params.id}`);
-  res.status(201).json({ cell: newCell });
+  const cell = await repositories().researchArtifacts.createNotebookCell(newCell);
+  await writeAudit(user, 'CREATE', 'NOTEBOOK_CELL', newCell.id, `Added cell to notebook ${req.params.id}`, req.ip);
+  res.status(201).json({ cell });
 });
 
-apiRouter.put('/notebooks/cells/:id', requirePermission('EDIT'), (req: Request, res: Response) => {
+apiRouter.put('/notebooks/cells/:id', requirePermission('EDIT'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { title, content, metadata } = req.body;
-  const state = db.getState();
-  const cell = state.notebook_cells.find(c => c.id === req.params.id);
+  const cell = await repositories().researchArtifacts.findNotebookCellById(req.params.id);
   if (!cell) return res.status(404).json({ error: 'Cell not found' });
 
-  const cellAuth = canAccessNotebookCell(user, cell, 'WRITE');
+  const cellAuth = await canAccessNotebookCell(user, cell, 'WRITE');
   if (!cellAuth.allowed) {
-    db.logAudit(
-      user.id,
-      'VERIFY',
-      'SECURITY_BOLA',
-      cell.id,
-      `BOLA Denied: ${user.name} denied EDIT on notebook cell "${cell.id}"`
-    );
+    await writeAudit(user, 'VERIFY', 'SECURITY_BOLA', cell.id,
+      `BOLA Denied: ${user.name} denied EDIT on notebook cell "${cell.id}"`, req.ip);
     return res.status(403).json({
       error: 'Access denied: You do not have permission to edit cells in this notebook',
       code: 'OBJECT_ACCESS_DENIED',
@@ -2262,26 +2608,18 @@ apiRouter.put('/notebooks/cells/:id', requirePermission('EDIT'), (req: Request, 
   if (content !== undefined) cell.content = content;
   if (metadata !== undefined) cell.metadata = metadata;
 
-  db.save();
-  res.json({ cell });
+  const updatedCell = await repositories().researchArtifacts.updateNotebookCell(cell.id, { title, content, metadata });
+  res.json({ cell: updatedCell });
 });
 
-apiRouter.delete('/notebooks/cells/:id', requirePermission('DELETE'), (req: Request, res: Response) => {
+apiRouter.delete('/notebooks/cells/:id', requirePermission('DELETE'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
-  const state = db.getState();
-  const idx = state.notebook_cells.findIndex(c => c.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Cell not found' });
-
-  const cell = state.notebook_cells[idx];
-  const cellAuth = canAccessNotebookCell(user, cell, 'DELETE');
+  const cell = await repositories().researchArtifacts.findNotebookCellById(req.params.id);
+  if (!cell) return res.status(404).json({ error: 'Cell not found' });
+  const cellAuth = await canAccessNotebookCell(user, cell, 'DELETE');
   if (!cellAuth.allowed) {
-    db.logAudit(
-      user.id,
-      'VERIFY',
-      'SECURITY_BOLA',
-      cell.id,
-      `BOLA Denied: ${user.name} denied DELETE on notebook cell "${cell.id}"`
-    );
+    await writeAudit(user, 'VERIFY', 'SECURITY_BOLA', cell.id,
+      `BOLA Denied: ${user.name} denied DELETE on notebook cell "${cell.id}"`, req.ip);
     return res.status(403).json({
       error: 'Access denied: You do not have permission to delete cells in this notebook',
       code: 'OBJECT_ACCESS_DENIED',
@@ -2289,45 +2627,41 @@ apiRouter.delete('/notebooks/cells/:id', requirePermission('DELETE'), (req: Requ
     });
   }
 
-  state.notebook_cells.splice(idx, 1);
-  db.logAudit(user.id, 'DELETE', 'NOTEBOOK_CELL', req.params.id, 'Deleted notebook cell');
+  await repositories().researchArtifacts.deleteNotebookCell(req.params.id);
+  await writeAudit(user, 'DELETE', 'NOTEBOOK_CELL', req.params.id, 'Deleted notebook cell', req.ip);
   res.json({ success: true });
 });
 
 // ----------------------------------------------------
 // 10. EXPERIMENT SANDBOX (Section 37)
 // ----------------------------------------------------
-apiRouter.get('/experiments', (req: Request, res: Response) => {
+apiRouter.get('/experiments', async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { project_id } = req.query;
-  const state = db.getState();
 
   if (project_id) {
-    const proj = authorizeProject(req, res, String(project_id), 'READ');
+    const proj = await authorizeProject(req, res, String(project_id), 'READ');
     if (!proj) return;
-    const experiments = state.experiments.filter(e => e.project_id === String(project_id));
+    const experiments = await repositories().researchArtifacts.getExperimentsByProject(String(project_id));
     return res.json({ experiments });
   }
 
-  const list = state.experiments.filter(e => canAccessExperiment(user, e, 'READ').allowed);
+  const allExperiments = await repositories().researchArtifacts.getAllExperiments();
+  const list = (await Promise.all(allExperiments.map(async experiment =>
+    (await canAccessExperiment(user, experiment, 'READ')).allowed ? experiment : null
+  ))).filter((experiment): experiment is Experiment => experiment !== null);
   res.json({ experiments: list });
 });
 
-apiRouter.get('/experiments/:id', (req: Request, res: Response) => {
+apiRouter.get('/experiments/:id', async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
-  const state = db.getState();
-  const experiment = state.experiments.find(e => e.id === req.params.id);
+  const experiment = await repositories().researchArtifacts.getExperimentById(req.params.id);
   if (!experiment) return res.status(404).json({ error: 'Experiment not found' });
 
-  const auth = canAccessExperiment(user, experiment, 'READ');
+  const auth = await canAccessExperiment(user, experiment, 'READ');
   if (!auth.allowed) {
-    db.logAudit(
-      user.id,
-      'VERIFY',
-      'SECURITY_BOLA',
-      experiment.id,
-      `BOLA Denied: ${user.name} denied READ on experiment "${experiment.id}"`
-    );
+    await writeAudit(user, 'VERIFY', 'SECURITY_BOLA', experiment.id,
+      `BOLA Denied: ${user.name} denied READ on experiment "${experiment.id}"`, req.ip);
     return res.status(403).json({
       error: 'Access denied: You do not have permission to access this experiment',
       code: 'OBJECT_ACCESS_DENIED',
@@ -2338,7 +2672,7 @@ apiRouter.get('/experiments/:id', (req: Request, res: Response) => {
   res.json({ experiment });
 });
 
-apiRouter.post('/experiments', requirePermission('CREATE'), (req: Request, res: Response) => {
+apiRouter.post('/experiments', requirePermission('CREATE'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { 
     project_id, 
@@ -2353,13 +2687,15 @@ apiRouter.post('/experiments', requirePermission('CREATE'), (req: Request, res: 
     return res.status(400).json({ error: 'title and baseline_model_id are required' });
   }
 
-  const state = db.getState();
   let targetProj: any = null;
   if (project_id) {
-    targetProj = authorizeProject(req, res, String(project_id), 'WRITE');
+    targetProj = await authorizeProject(req, res, String(project_id), 'WRITE');
     if (!targetProj) return;
   } else {
-    const writableProjects = state.projects.filter(p => canAccessProject(user, p, 'WRITE').allowed);
+    const allProjects = await repositories().projects.listAll();
+    const writableProjects = (await Promise.all(allProjects.map(async project =>
+      (await canAccessProject(user, project, 'WRITE')).allowed ? project : null
+    ))).filter((project): project is Project => project !== null);
     if (writableProjects.length > 0) {
       targetProj = writableProjects[0];
     } else {
@@ -2370,7 +2706,7 @@ apiRouter.post('/experiments', requirePermission('CREATE'), (req: Request, res: 
     }
   }
 
-  const baselineModel = state.models.find(m => m.model_id === baseline_model_id);
+  const baselineModel = await repositories().scientificRegistry.getModelById(baseline_model_id);
   if (!baselineModel) return res.status(404).json({ error: 'Baseline model not found' });
 
   // Compute baseline and experimental outputs
@@ -2403,56 +2739,56 @@ apiRouter.post('/experiments', requirePermission('CREATE'), (req: Request, res: 
     updated_at: new Date().toISOString()
   };
 
-  state.experiments.unshift(experiment);
-  db.logAudit(user.id, 'CREATE', 'EXPERIMENT', experiment.id, `Created experiment "${experiment.title}"`);
+  const savedExperiment = await repositories().researchArtifacts.createExperiment(experiment);
+  await writeAudit(user, 'CREATE', 'EXPERIMENT', experiment.id, `Created experiment "${experiment.title}"`, req.ip);
 
-  res.status(201).json({ experiment });
+  res.status(201).json({ experiment: savedExperiment });
 });
 
 // ----------------------------------------------------
 // 11. PROVENANCE, REPRODUCIBILITY & AUDIT TRAIL (Sections 38, 39, 40)
 // ----------------------------------------------------
-apiRouter.get('/provenance', (req: Request, res: Response) => {
+apiRouter.get('/provenance', async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { project_id } = req.query;
-  const state = db.getState();
-
   if (project_id) {
-    const proj = authorizeProject(req, res, String(project_id), 'READ');
+    const proj = await authorizeProject(req, res, String(project_id), 'READ');
     if (!proj) return;
-    const records = state.provenance_records.filter(p => p.project_id === String(project_id));
+    const records = await repositories().researchArtifacts.getProvenanceRecords(String(project_id));
     return res.json({ records });
   }
 
-  const list = state.provenance_records.filter(p => {
-    const proj = state.projects.find(prj => prj.id === p.project_id);
-    return !proj || canAccessProject(user, proj, 'READ').allowed;
-  });
+  const provenance = await repositories().researchArtifacts.getAllProvenanceRecords();
+  const list = (await Promise.all(provenance.map(async record => {
+    const project = await repositories().projects.findById(record.project_id);
+    return !project || (await canAccessProject(user, project, 'READ')).allowed ? record : null;
+  }))).filter((record): record is NonNullable<typeof record> => record !== null);
   res.json({ records: list });
 });
 
 // Reproducibility Re-Run execution (Section 40)
-apiRouter.post('/provenance/re-run', requirePermission('USE'), (req: Request, res: Response) => {
+apiRouter.post('/provenance/re-run', requirePermission('USE'), async (req: Request, res: Response) => {
   const user = getCurrentUser(req);
   const { provenance_id } = req.body;
   if (!provenance_id) {
     return res.status(400).json({ error: 'provenance_id is required' });
   }
 
-  const state = db.getState();
-  const prov = state.provenance_records.find(p => p.id === provenance_id);
+  const prov = (await repositories().researchArtifacts.getAllProvenanceRecords())
+    .find(record => record.id === provenance_id);
 
   if (!prov) return res.status(404).json({ error: 'Provenance record not found' });
 
   // Check access to parent project
-  const proj = authorizeProject(req, res, prov.project_id, 'READ');
+  const proj = await authorizeProject(req, res, prov.project_id, 'READ');
   if (!proj) return;
 
   // Execute verification re-run against manifest
   const executionHash = crypto.createHash('sha256').update(JSON.stringify(prov.reproducibility_manifest)).digest('hex');
   const isReproducible = executionHash === prov.provenance_hash || true; // verification matches
 
-  db.logAudit(user.id, 'EXECUTE', 'PROVENANCE', prov.id, `Executed reproducibility re-run for manifest ${prov.id}`);
+  await writeAudit(user, 'EXECUTE', 'PROVENANCE', prov.id,
+    `Executed reproducibility re-run for manifest ${prov.id}`, req.ip);
 
   res.json({
     provenance_id: prov.id,
@@ -2464,8 +2800,8 @@ apiRouter.post('/provenance/re-run', requirePermission('USE'), (req: Request, re
   });
 });
 
-apiRouter.get('/audit', requireAdmin(), (req: Request, res: Response) => {
+apiRouter.get('/audit', requireAdmin(), async (req: Request, res: Response) => {
   const { limit = 100 } = req.query;
-  const logs = db.getState().audit_logs.slice(0, Number(limit));
+  const logs = await repositories().auditLogs.queryLogs({ limit: Number(limit) });
   res.json({ logs });
 });

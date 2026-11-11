@@ -13,7 +13,7 @@
  * 7. scientific_validity = 'NOT_ESTABLISHED' strictly preserved.
  */
 
-import * as crypto from 'crypto';
+import { sha256Hex } from '../crypto';
 import { canonicalizeJson } from '../provenance/provenancePersistence';
 import { deepFreeze } from './dataStatePipeline';
 import { ResearchProject, PlannedAnalysis } from './researchProjectContracts';
@@ -111,7 +111,7 @@ export function computeAuthorizationHash(payload: AuthorizationProvenancePayload
   };
 
   const canonicalString = canonicalizeJson(normalized);
-  return crypto.createHash('sha256').update(canonicalString, 'utf8').digest('hex');
+  return sha256Hex(canonicalString);
 }
 
 export interface CreateAuthorizationOptions {

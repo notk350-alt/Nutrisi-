@@ -25,10 +25,13 @@ import {
   jsonb,
   primaryKey,
   unique,
-  index
+  index,
+  check
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import { users } from './identity';
 import { projects } from './collaboration';
+import type { MaterialType } from '../types';
 
 // ============================================================================
 // 16. Academic & Reference Materials (Baseline: 2 records)
@@ -40,11 +43,12 @@ export const materials = pgTable(
     title: varchar('title', { length: 255 }).notNull(),
     author: varchar('author', { length: 255 }),
     subject: varchar('subject', { length: 128 }),
-    type: varchar('type', { length: 32 }).notNull(), // 'PDF' | 'TXT' | 'EPUB' | 'MARKDOWN' | 'DOCUMENT'
+    type: varchar('type', { length: 32 }).$type<MaterialType>().notNull(),
     description: text('description'),
     year: integer('year'),
     publisher: varchar('publisher', { length: 255 }),
     language: varchar('language', { length: 16 }).default('en'),
+    url: text('url'),
     source: varchar('source', { length: 255 }),
     license: varchar('license', { length: 64 }),
     tags: jsonb('tags').$type<string[]>().notNull().default([]),
@@ -60,6 +64,9 @@ export const materials = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
   },
   (table) => [
+    check('materials_type_check', sql`${table.type} IN ('PDF', 'TXT', 'EPUB', 'DOCX', 'PPTX', 'XLSX', 'CSV', 'IMAGE')`),
+    check('materials_year_check', sql`${table.year} IS NULL OR (${table.year} >= 1800 AND ${table.year} <= 2100)`),
+    check('materials_file_size_bytes_check', sql`${table.fileSizeBytes} >= 0`),
     index('idx_materials_uploaded_by').on(table.uploadedBy),
     index('idx_materials_type').on(table.type)
   ]
@@ -135,6 +142,10 @@ export const readingProgress = pgTable(
   },
   (table) => [
     unique('uq_reading_progress_user_material').on(table.userId, table.materialId),
+    check(
+      'reading_progress_progress_pct_check',
+      sql`${table.progressPct} >= 0.0 AND ${table.progressPct} <= 100.0`
+    ),
     index('idx_reading_progress_user').on(table.userId)
   ]
 );
@@ -157,6 +168,7 @@ export const bookmarks = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
   },
   (table) => [
+    check('bookmarks_page_check', sql`${table.page} >= 1`),
     index('idx_bookmarks_user_material').on(table.userId, table.materialId)
   ]
 );
@@ -180,6 +192,7 @@ export const highlights = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
   },
   (table) => [
+    check('highlights_page_check', sql`${table.page} >= 1`),
     index('idx_highlights_user_material').on(table.userId, table.materialId)
   ]
 );

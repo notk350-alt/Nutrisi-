@@ -99,6 +99,34 @@ async function makeRequest(
 describe('MVS-B2.2: Authentication & Session Management', () => {
   const testApp = createTestApp();
 
+  describe('Authentication environment configuration', () => {
+    it('does not enable demo auth in staging even when explicitly requested', () => {
+      const originalNodeEnv = process.env.NODE_ENV;
+      const originalDemoAuth = process.env.ENABLE_DEMO_AUTH;
+      process.env.NODE_ENV = 'staging';
+      process.env.ENABLE_DEMO_AUTH = 'true';
+      try {
+        expect(getAuthConfig().enableDemoAuth).toBe(false);
+      } finally {
+        if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+        else process.env.NODE_ENV = originalNodeEnv;
+        if (originalDemoAuth === undefined) delete process.env.ENABLE_DEMO_AUTH;
+        else process.env.ENABLE_DEMO_AUTH = originalDemoAuth;
+      }
+    });
+
+    it('rejects an invalid session lifetime instead of silently using the default', () => {
+      const originalTtl = process.env.SESSION_TTL_SECONDS;
+      process.env.SESSION_TTL_SECONDS = 'not-a-number';
+      try {
+        expect(() => getAuthConfig()).toThrow('SESSION_TTL_SECONDS must be a positive integer.');
+      } finally {
+        if (originalTtl === undefined) delete process.env.SESSION_TTL_SECONDS;
+        else process.env.SESSION_TTL_SECONDS = originalTtl;
+      }
+    });
+  });
+
   beforeEach(() => {
     // Ensure clean session store state for test isolation
     defaultSessionStore.cleanExpiredSessions();
@@ -242,6 +270,29 @@ describe('MVS-B2.2: Authentication & Session Management', () => {
       }
     });
 
+    it('6a. non-admin users cannot list user profiles outside explicit demo mode', async () => {
+      const originalNodeEnv = process.env.NODE_ENV;
+      const originalDemoAuth = process.env.ENABLE_DEMO_AUTH;
+      process.env.NODE_ENV = 'test';
+      process.env.ENABLE_DEMO_AUTH = 'true';
+
+      try {
+        const login = await makeRequest(testApp, 'POST', '/api/auth/demo-login', { user_id: 'usr_researcher' });
+        expect(login.status).toBe(200);
+
+        process.env.NODE_ENV = 'production';
+        const response = await makeRequest(testApp, 'GET', '/api/users', undefined, {
+          Authorization: `Bearer ${login.body.token}`
+        });
+        expect(response.status).toBe(403);
+        expect(response.body.code).toBe('INSUFFICIENT_PERMISSION');
+      } finally {
+        process.env.NODE_ENV = originalNodeEnv;
+        if (originalDemoAuth === undefined) delete process.env.ENABLE_DEMO_AUTH;
+        else process.env.ENABLE_DEMO_AUTH = originalDemoAuth;
+      }
+    });
+
     it('7. header "x-user-id: usr_admin" does NOT bypass authentication or grant identity', async () => {
       const res = await makeRequest(testApp, 'GET', '/api/projects', undefined, {
         'x-user-id': 'usr_admin'
@@ -286,6 +337,25 @@ describe('MVS-B2.2: Authentication & Session Management', () => {
       } finally {
         process.env.NODE_ENV = origEnv;
         if (origDemo !== undefined) process.env.ENABLE_DEMO_AUTH = origDemo;
+      }
+    });
+
+    it('9a. demo authentication stays disabled in production when explicitly enabled', async () => {
+      const origEnv = process.env.NODE_ENV;
+      const origDemo = process.env.ENABLE_DEMO_AUTH;
+      process.env.NODE_ENV = 'production';
+      process.env.ENABLE_DEMO_AUTH = 'true';
+
+      try {
+        const res = await makeRequest(testApp, 'POST', '/api/auth/demo-login', {
+          user_id: 'usr_admin'
+        });
+        expect(res.status).toBe(403);
+        expect(res.body.code).toBe('DEMO_AUTH_DISABLED');
+      } finally {
+        process.env.NODE_ENV = origEnv;
+        if (origDemo !== undefined) process.env.ENABLE_DEMO_AUTH = origDemo;
+        else delete process.env.ENABLE_DEMO_AUTH;
       }
     });
 

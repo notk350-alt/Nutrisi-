@@ -25,7 +25,7 @@ import {
   OrchestratorDependencies
 } from './types';
 import { constructAuthorizationUrl, timingSafeEqual } from './primitives';
-import { defaultOIDCTransactionStore } from './transactionStore';
+import { getRuntimeOIDCTransactionStore } from './runtimeTransactionStore';
 import { defaultGoogleJWKSClient } from './jwks';
 import { exchangeGoogleAuthorizationCode } from './tokenExchange';
 import { getOIDCConfig, validateOIDCConfig } from './config';
@@ -88,16 +88,17 @@ export async function initiateGoogleLogin(
   }
 
   // 2. Create Pre-Auth Server Transaction
-  const store = dependencies?.transactionStore ?? defaultOIDCTransactionStore;
-  let created: ReturnType<typeof store.createTransaction>;
+  const store = dependencies?.transactionStore ?? getRuntimeOIDCTransactionStore();
+  let created: Awaited<ReturnType<typeof store.createTransaction>>;
 
   try {
-    created = store.createTransaction({
+    created = await store.createTransaction({
       clientBinding: options?.clientBinding,
       returnUrl: options?.returnUrl,
       ttlSeconds: options?.ttlSeconds,
       currentTime: options?.currentTime,
-      redirectUri: config.redirectUri
+      redirectUri: config.redirectUri,
+      purpose: 'login'
     });
   } catch (storeError: any) {
     return {
@@ -225,8 +226,8 @@ export async function handleGoogleCallback(
   }
 
   // 6. Pre-Validate Transaction Presence & Expiry (Without Premature Consumption)
-  const store = dependencies?.transactionStore ?? defaultOIDCTransactionStore;
-  const existingTx = store.getTransactionByState(trimmedState);
+  const store = dependencies?.transactionStore ?? getRuntimeOIDCTransactionStore();
+  const existingTx = await store.getTransactionByState(trimmedState);
 
   if (!existingTx) {
     return {

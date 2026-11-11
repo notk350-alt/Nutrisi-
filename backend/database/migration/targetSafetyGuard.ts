@@ -134,6 +134,16 @@ export class TargetSafetyGuard {
       };
     }
 
+    if (config.allowedDatabaseNames && !config.allowedDatabaseNames.includes(dbName)) {
+      return {
+        allowed: false,
+        status: 'BLOCKED_TARGET_VERIFICATION',
+        sanitizedHost: hostname,
+        sanitizedDatabase: dbName,
+        reason: 'Target database name is not in the authorized staging/test allowlist.'
+      };
+    }
+
     // 5. Fail-Closed Production Indicators Detection
     if (
       this.PRODUCTION_PATTERN.test(hostname) ||

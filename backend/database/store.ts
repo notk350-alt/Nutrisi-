@@ -202,87 +202,117 @@ export class DatabaseStore {
         );
       }
 
+      const collectionKeys: (keyof DatabaseState)[] = [
+        'users',
+        'teams',
+        'team_members',
+        'projects',
+        'project_members',
+        'materials',
+        'material_collections',
+        'reading_progress',
+        'bookmarks',
+        'highlights',
+        'notes',
+        'units',
+        'variables',
+        'parameters',
+        'formulas',
+        'algorithms',
+        'models',
+        'references',
+        'interpretation_rules',
+        'calculations',
+        'datasets',
+        'dataset_versions',
+        'statistics_analyses',
+        'charts',
+        'notebooks',
+        'notebook_cells',
+        'code_executions',
+        'experiments',
+        'audit_logs',
+        'provenance_records',
+        'role_requests',
+        'external_identities'
+      ];
+
+      for (const key of collectionKeys) {
+        if (!Array.isArray(state[key])) {
+          throw new DatabaseInitializationError(
+            `Database file at ${this.dbFilePath} contains a missing or invalid collection '${key}' (expected an array)`,
+            this.dbFilePath
+          );
+        }
+      }
+
       let updated = false;
-      if (!state.interpretation_rules) {
-        state.interpretation_rules = [];
-        updated = true;
-      }
-        for (const r of DEMO_INTERPRETATION_RULES) {
-          if (!state.interpretation_rules.some(existing => existing.rule_id === r.rule_id)) {
-            state.interpretation_rules.push(r);
-            updated = true;
-          }
-        }
-        for (const f of DEMO_FORMULAS) {
-          const existingIdx = state.formulas.findIndex(existing => existing.formula_id === f.formula_id);
-          if (existingIdx === -1) {
-            state.formulas.push(f);
-            updated = true;
-          } else if (f.formula_id === 'FORMULA_BMR_MIFFLIN' && state.formulas[existingIdx].version !== f.version) {
-            state.formulas[existingIdx] = f;
-            updated = true;
-          }
-        }
-        for (const v of DEMO_VARIABLES) {
-          if (!state.variables.some(existing => existing.variable_id === v.variable_id)) {
-            state.variables.push(v);
-            updated = true;
-          }
-        }
-        for (const p of DEMO_PARAMETERS) {
-          if (!state.parameters.some(existing => existing.parameter_id === p.parameter_id)) {
-            state.parameters.push(p);
-            updated = true;
-          }
-        }
-        for (const u of STANDARD_UNITS) {
-          if (!state.units.some(existing => existing.unit_id === u.unit_id)) {
-            state.units.push(u);
-            updated = true;
-          }
-        }
-        if (!state.role_requests) {
-          state.role_requests = [];
+      for (const r of DEMO_INTERPRETATION_RULES) {
+        if (!state.interpretation_rules.some(existing => existing.rule_id === r.rule_id)) {
+          state.interpretation_rules.push(r);
           updated = true;
         }
-        if (!state.external_identities) {
-          state.external_identities = [];
+      }
+      for (const f of DEMO_FORMULAS) {
+        const existingIdx = state.formulas.findIndex(existing => existing.formula_id === f.formula_id);
+        if (existingIdx === -1) {
+          state.formulas.push(f);
+          updated = true;
+        } else if (f.formula_id === 'FORMULA_BMR_MIFFLIN' && state.formulas[existingIdx].version !== f.version) {
+          state.formulas[existingIdx] = f;
           updated = true;
         }
-        if (state.users) {
-          for (const u of state.users) {
-            if (!u.account_status) {
-              u.account_status = 'ACTIVE';
-              updated = true;
-            }
-            if (u.token_version === undefined) {
-              u.token_version = 1;
-              updated = true;
-            }
-            if (u.email_verified === undefined) {
-              u.email_verified = true;
-              updated = true;
-            }
-            if (!u.provider) {
-              u.provider = 'local';
-              u.provider_subject_id = `local_${u.id}`;
-              updated = true;
-            }
-            if (!u.display_name) {
-              u.display_name = u.name;
-              updated = true;
-            }
-            if (!u.updated_at) {
-              u.updated_at = u.created_at || '2026-09-21T10:00:00.000Z';
-              updated = true;
-            }
-          }
-        }
-        if (updated) {
-          this.saveToDisk(state);
-        }
-        return state;
       }
+      for (const v of DEMO_VARIABLES) {
+        if (!state.variables.some(existing => existing.variable_id === v.variable_id)) {
+          state.variables.push(v);
+          updated = true;
+        }
+      }
+      for (const p of DEMO_PARAMETERS) {
+        if (!state.parameters.some(existing => existing.parameter_id === p.parameter_id)) {
+          state.parameters.push(p);
+          updated = true;
+        }
+      }
+      for (const u of STANDARD_UNITS) {
+        if (!state.units.some(existing => existing.unit_id === u.unit_id)) {
+          state.units.push(u);
+          updated = true;
+        }
+      }
+      for (const user of state.users) {
+        if (!user.account_status) {
+          user.account_status = 'ACTIVE';
+          updated = true;
+        }
+        if (user.token_version === undefined) {
+          user.token_version = 1;
+          updated = true;
+        }
+        if (user.email_verified === undefined) {
+          user.email_verified = true;
+          updated = true;
+        }
+        if (!user.provider) {
+          user.provider = 'local';
+          user.provider_subject_id = `local_${user.id}`;
+          updated = true;
+        }
+        if (!user.display_name) {
+          user.display_name = user.name;
+          updated = true;
+        }
+        if (!user.updated_at) {
+          user.updated_at = user.created_at || '2026-09-21T10:00:00.000Z';
+          updated = true;
+        }
+      }
+      if (updated) {
+        this.saveToDisk(state);
+      }
+      return state;
+    }
 
       // Bootstrap case: database file does not exist on disk
       const fresh = this.generateSeedData();
@@ -444,7 +474,7 @@ export class DatabaseStore {
   public getUserByEmail(email: string): User | undefined {
     if (!email || typeof email !== 'string') return undefined;
     const normalized = email.trim().toLowerCase();
-    return this.state.users.find(u => u.email.toLowerCase() === normalized);
+    return this.state.users.find(u => typeof u.email === 'string' && u.email.trim().toLowerCase() === normalized);
   }
 
   /**

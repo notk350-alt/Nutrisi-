@@ -43,7 +43,7 @@ Tujuan pemetaan ini adalah menjamin transformasi data dari file tunggal `lowdb` 
 | 13 | `team_members` (3) | `team_members` | - | Relational Murni |
 | 14 | `projects` (2) | `projects` | - | Hybrid (Tags JSONB) |
 | 15 | `project_members` (4) | `project_members` | - | Relational Murni |
-| 16 | `materials` (2) | `materials` | `material_projects` | Hybrid (Tags JSONB, Project IDs Junction) |
+| 16 | `materials` (2) | `materials` | `material_projects` | Hybrid (Tags JSONB, Source dan URL relasional, Project IDs Junction) |
 | 17 | `material_collections` (1) | `material_collections` | `collection_materials` | Relational + Junction (Material IDs Junction) |
 | 18 | `reading_progress` (1) | `reading_progress` | - | Relational Murni |
 | 19 | `bookmarks` (1) | `bookmarks` | - | Relational Murni |
@@ -54,7 +54,7 @@ Tujuan pemetaan ini adalah menjamin transformasi data dari file tunggal `lowdb` 
 | 24 | `statistics_analyses` (1) | `statistics_analyses` | - | Hybrid (Target Columns, Results JSONB) |
 | 25 | `charts` (1) | `charts` | - | Hybrid (Config JSONB) |
 | 26 | `notebooks` (1) | `notebooks` | - | Relational Murni |
-| 27 | `notebook_cells` (5) | `notebook_cells` | - | Relational Murni |
+| 27 | `notebook_cells` (5) | `notebook_cells` | - | Hybrid (metadata JSONB mempertahankan referensi sel) |
 | 28 | `code_executions` (0) | `code_executions` | - | Relational Murni |
 | 29 | `experiments` (1) | `experiments` | - | Hybrid (Modifications, Outputs JSONB) |
 | 30 | `provenance_records` (1) | `provenance_records` | - | Hybrid (Manifest JSONB) |
@@ -68,7 +68,7 @@ Tujuan pemetaan ini adalah menjamin transformasi data dari file tunggal `lowdb` 
 ### 3.1 Format Temporal (Tanggal & Waktu)
 - **Sumber JSON:** String ISO-8601 UTC (contoh: `"2026-09-21T10:00:00.000Z"` atau `"2026-09-01T00:00:00Z"`).
 - **Target PostgreSQL:** `TIMESTAMPTZ` (Timestamp with time zone).
-- **Aturan Konversi:** Diparsing menggunakan parser waktu standar UTC. Jika bernilai `null` atau `undefined` pada kolom opsional, disimpan sebagai `NULL`. Pada kolom audit wajib, jika kosong diberi fallback `CURRENT_TIMESTAMP`.
+- **Aturan Konversi:** String ISO-8601 dipetakan tanpa mengubah instant waktunya. Kolom opsional `null` disimpan sebagai `NULL`; timestamp historis audit/provenance yang hilang atau tidak valid memblokir migrasi. Untuk kolom lain yang tidak tersedia di sumber, hanya default eksplisit DDL yang digunakan; migrator tidak membuat timestamp aplikasi.
 
 ### 3.2 Tipe Numerik & Pecahan Ilmiah
 - **Besaran Skalar Fisika & Konversi Satuan:**
@@ -92,6 +92,8 @@ Beberapa entitas JSON menyimpan relasi many-to-many dalam bentuk array of string
 9. `models.reference_ids` -> Diekstrak menjadi `scientific_model_references (model_id, reference_id)`.
 10. `interpretation_rules.reference_ids` -> Diekstrak menjadi `scientific_interpretation_rule_references (rule_id, reference_id)`.
 
+Seluruh elemen relasi dipertahankan. Referensi yang tidak ditemukan dilaporkan sebagai orphan dan memblokir migrasi; migrator tidak membuang atau menyaring relasi yang tidak valid.
+
 ### 3.4 Penyimpanan JSONB Terpilih
 Struktur data berikut sengaja dipertahankan sebagai `JSONB` karena sifatnya yang dinamis, bersarang (*deeply nested*), atau berupa skema eksternal:
 - `scientific_formulas.expression_ast`: Pohon ekspresi matematika AST yang diproses rekursif oleh `scientific/engine/calculationEngine.ts`.
@@ -100,6 +102,10 @@ Struktur data berikut sengaja dipertahankan sebagai `JSONB` karena sifatnya yang
 - `dataset_versions.columns`, `dataset_versions.data`, `dataset_versions.validation_report`: Matriks tabular dan laporan validasi dataset dinamis.
 - `statistics_analyses.results`: Dictionary hasil kalkulasi inferensial/deskriptif beragam dimensi.
 - `provenance_records.reproducibility_manifest`: Manifest hash environment dan dependensi.
+- `notebook_cells.metadata`: Referensi dataset, formula, chart, atau artefak sel yang bersifat dinamis.
+- `scientific_models.time_config`: Konfigurasi waktu model; objek kosong menggunakan default skema `{}` bila sumber tidak memilikinya.
+
+Field `materials.source` dan `materials.url` disimpan terpisah agar URL tidak menggantikan sumber/penerbit.
 
 ---
 
@@ -108,43 +114,35 @@ Struktur data berikut sengaja dipertahankan sebagai `JSONB` karena sifatnya yang
 Untuk mencegah galat *foreign key constraint violation* selama migrasi, pemuatan data wajib mengikuti 7 gelombang dependensi berikut:
 
 ```
-[Gelombang 1: Master Standar Ilmiah]
-  scientific_units, scientific_references
+[Gelombang 1: Master, Identitas & Tim]
+  scientific_units, scientific_references, users, external_identities,
+  role_requests, teams
 
-[Gelombang 2: Variabel & Parameter Ilmiah]
-  scientific_variables, scientific_parameters
-  -> scientific_parameter_references
+[Gelombang 2: Variabel & Proyek]
+  scientific_variables, projects
 
-[Gelombang 3: Formula, Algoritma, Model & Aturan Interpretasi]
-  scientific_formulas, scientific_algorithms, scientific_models, scientific_interpretation_rules
-  -> scientific_formula_parameters, scientific_formula_references
-  -> scientific_algorithm_parameters, scientific_algorithm_references
-  -> scientific_model_variables, scientific_model_formulas, scientific_model_parameters, scientific_model_references
-  -> scientific_interpretation_rule_references
+[Gelombang 3: Parameter, Formula & Keanggotaan]
+  scientific_parameters -> scientific_parameter_references
+  scientific_formulas -> scientific_formula_parameters, scientific_formula_references
+  team_members, project_members
 
-[Gelombang 4: Identitas, Tim & Proyek Utama]
-  users
-  -> external_identities, role_requests
-  -> teams -> team_members
-  -> projects -> project_members
-
-[Gelombang 5: Academic Materials & Dataset Workspace]
+[Gelombang 4: Algoritma & Material]
+  scientific_algorithms -> scientific_algorithm_parameters, scientific_algorithm_references
   materials -> material_projects
   material_collections -> collection_materials
-  reading_progress, bookmarks, highlights, notes
-  datasets -> dataset_versions
 
-[Gelombang 6: Analisis, Visualisasi & Komputasi Riset]
-  statistics_analyses
-  charts
-  notebooks -> notebook_cells
-  code_executions
-  experiments
-  scientific_calculations
+[Gelombang 5: Model, Dataset & Anotasi]
+  scientific_models -> scientific_model_variables, scientific_model_formulas,
+  scientific_model_algorithms, scientific_model_parameters, scientific_model_references
+  datasets, reading_progress, bookmarks, highlights, notes
 
-[Gelombang 7: Jejak Audit & Provenance]
-  provenance_records
-  audit_logs
+[Gelombang 6: Aturan, Versi Dataset, Analisis & Notebook]
+  scientific_interpretation_rules -> scientific_interpretation_rule_references
+  dataset_versions, statistics_analyses, charts, notebooks
+
+[Gelombang 7: Sel, Eksekusi, Eksperimen & Jejak]
+  notebook_cells, code_executions, experiments, scientific_calculations,
+  provenance_records, audit_logs
 ```
 
 ---
@@ -154,7 +152,7 @@ Untuk mencegah galat *foreign key constraint violation* selama migrasi, pemuatan
 Setelah proses pemuatan data selesai, wajib dijalankan audit verifikasi otomatis:
 
 1. **Uji Kuantitas Record (Row Count Audit):**
-   - Memastikan `COUNT(*)` pada setiap tabel PostgreSQL sama persis dengan panjang array pada koleksi JSON sumber.
+   - Memastikan `COUNT(*)` pada setiap tabel PostgreSQL sama persis dengan jumlah record sumber atau relasi hasil normalisasi.
    - Total record pada 32 koleksi dasar:
      - `scientific_units`: 33
      - `scientific_references`: 2
@@ -188,7 +186,9 @@ Setelah proses pemuatan data selesai, wajib dijalankan audit verifikasi otomatis
      - `provenance_records`: 1
      - `audit_logs`: 1
      - `scientific_calculations`: 0
-     - **Total Baseline Record:** 83 record.
+     - **Total record sumber:** 88 record dalam 32 koleksi JSON.
+     - **Total relasi hasil normalisasi:** 30 baris pada 13 junction tables.
+     - **Total baris fisik yang direncanakan:** 118 baris pada 45 tabel PostgreSQL.
 
 2. **Uji Kesetaraan Deep Value & Hash (Zero-Delta Audit):**
    - Menghitung SHA-256 canonical JSON representation dari data yang diekstrak kembali dari PostgreSQL dan membandingkannya dengan sumber JSON asli.
@@ -204,9 +204,9 @@ Setelah proses pemuatan data selesai, wajib dijalankan audit verifikasi otomatis
 ## 6. Rencana Rollback & Kriteria Keberhasilan/Kegagalan
 
 ### 6.1 Kriteria Keberhasilan (Success Gates)
-- 100% dari 32 tabel terisi tanpa galat constraint.
-- Seluruh 83 record dasar termuat dengan ID primer utuh.
-- Seluruh baris relasi pada 10 junction tables terverifikasi.
+- Seluruh 45 tabel target diverifikasi tanpa galat constraint.
+- Seluruh 88 record sumber termuat dengan ID primer utuh.
+- Seluruh 30 relasi hasil normalisasi pada 13 junction tables terverifikasi.
 - Zero floating-point drift pada evaluasi formula AST dan kalkulasi BMR/BMI.
 
 ### 6.2 Kriteria Kegagalan (Failure Triggers)
@@ -216,6 +216,7 @@ Setelah proses pemuatan data selesai, wajib dijalankan audit verifikasi otomatis
 - Kegagalan uji kalkulasi ilmiah pada modul `scientific/`.
 
 ### 6.3 Prosedur Rollback Cepat
-1. Database PostgreSQL target dibersihkan (`DROP SCHEMA public CASCADE; CREATE SCHEMA public;`).
-2. Aplikasi tetap sepenuhnya terhubung ke adapter JSON operasional (`LowdbJsonDatabase` / `nutribodysim_db.json`).
-3. Laporan audit galat disusun untuk mengidentifikasi penyebab kegagalan sebelum mencoba ulang.
+1. Kegagalan dalam transaksi migrasi harus memicu `ROLLBACK` atomik.
+2. Jika verifikasi pascamigrasi gagal setelah transaksi berhasil di-commit, hentikan proses dan laporkan kondisi aktual; jangan menghapus data secara otomatis.
+3. Aplikasi tetap sepenuhnya terhubung ke adapter JSON operasional (`LowdbJsonDatabase` / `nutribodysim_db.json`).
+4. Susun laporan audit galat dan minta persetujuan eksplisit sebelum tindakan pemulihan apa pun.

@@ -5,25 +5,33 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-// Ensure demo authentication is active by default in the web applet container
-if (process.env.ENABLE_DEMO_AUTH === undefined) {
-  process.env.ENABLE_DEMO_AUTH = 'true';
-}
-
 import express from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import path from 'path';
+import type { Server } from 'http';
 import { createServer as createViteServer } from 'vite';
-import { apiRouter } from './backend/routes/api';
 
 import fs from 'fs';
-import { db } from './backend/database/store';
+import {
+  closeRuntimeDatabase,
+  initializeRuntimeDatabase
+} from './backend/database/runtime';
 import { extractToken } from './backend/auth/authMiddleware';
-import { defaultSessionStore } from './backend/auth/sessionStore';
-import { canAccessMaterial } from './backend/auth/objectAuth';
+import { canAccessMaterialWithRepositories } from './backend/auth/objectAuth';
 
 async function startServer() {
+  const runtime = await initializeRuntimeDatabase();
+  console.log(`[NutriBodySim] Runtime provider: ${runtime.provider}`);
+  if (!runtime.health.ok) {
+    throw new Error(runtime.health.reason || 'Runtime database health check failed.');
+  }
+  const { apiRouter } = await import('./backend/routes/api');
   const app = express();
-  const PORT = 3000;
+  const configuredPort = process.env.PORT?.trim();
+  const port = configuredPort ? Number(configuredPort) : 3000;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('PORT must be an integer between 1 and 65535.');
+  }
 
   // Body parsing for JSON payloads and scientific data
   app.use(express.json({ limit: '30mb' }));
@@ -31,82 +39,119 @@ async function startServer() {
 
   // Protected storage for uploaded materials (BOLA / Path Traversal protected)
   const storageDir = path.resolve(process.cwd(), 'storage', 'materials');
-  app.get('/storage/materials/:filename', (req, res) => {
-    const rawFilename = req.params.filename;
-    // 1. Path traversal defense
-    if (rawFilename.includes('..') || rawFilename.includes('/') || rawFilename.includes('\\')) {
-      return res.status(400).json({ error: 'Invalid file path' });
-    }
-    const safePath = path.resolve(storageDir, rawFilename);
-    if (!safePath.startsWith(storageDir)) {
-      return res.status(403).json({ error: 'Access denied: Path traversal detected' });
-    }
-    if (!fs.existsSync(safePath)) {
-      return res.status(404).json({ error: 'File not found' });
-    }
+    app.get('/storage/materials/:filename', async (req, res, next) => {
+      try {
+        const rawFilename = req.params.filename;
+        if (rawFilename.includes('..') || rawFilename.includes('/') || rawFilename.includes('\\')) {
+          return res.status(400).json({ error: 'Invalid file path' });
+        }
 
-    // 2. Resolve material record
-    const state = db.getState();
-    const material = state.materials.find(m => m.file_path === rawFilename);
+        const safePath = path.resolve(storageDir, rawFilename);
+        if (path.dirname(safePath) !== storageDir) {
+          return res.status(403).json({ error: 'Access denied: Path traversal detected' });
+        }
+        try {
+          await fs.promises.access(safePath, fs.constants.R_OK);
+        } catch {
+          return res.status(404).json({ error: 'File not found' });
+        }
 
-    // 3. Disallow serving unmapped storage files (orphan or unlinked files)
-    if (!material) {
-      return res.status(404).json({ error: 'Material record not found for requested file' });
-    }
+        const repositories = runtime.repositories;
+        const material = await repositories.materials.findByFilePath(rawFilename);
+        if (!material) {
+          return res.status(404).json({ error: 'Material record not found for requested file' });
+        }
 
-    // 4. Enforce object authorization on material
-    const token = extractToken(req);
-    const validation = token ? defaultSessionStore.validateSession(token) : null;
-    const user = validation?.valid && validation.userId ? state.users.find(u => u.id === validation.userId) : undefined;
+        const token = extractToken(req);
+        const validation = token ? await repositories.sessions.validateSession(token) : null;
+        const user = validation?.valid && validation.userId
+          ? await repositories.users.findById(validation.userId)
+          : null;
 
-    if (user) {
-      const auth = canAccessMaterial(user, material, 'READ');
-      if (!auth.allowed) {
-        db.logAudit(
-          user.id,
-          'VERIFY',
-          'SECURITY_BOLA',
-          material.id,
-          `BOLA Denied: ${user.name} denied file download for "${material.title}" (${rawFilename})`
-        );
-        return res.status(403).json({
-          error: 'Access denied: You do not have permission to access this file',
-          code: 'OBJECT_ACCESS_DENIED'
-        });
+        if (user && (
+          (user.account_status && user.account_status !== 'ACTIVE') ||
+          validation?.tokenVersion !== (user.token_version ?? 1)
+        )) {
+          return res.status(403).json({
+            error: 'Access denied: Session is inactive or invalidated',
+            code: 'FORBIDDEN_ACCOUNT_STATUS'
+          });
+        }
+
+        if (user) {
+          const authorization = await canAccessMaterialWithRepositories(repositories, user, material, 'READ');
+          if (!authorization.allowed) {
+            await repositories.auditLogs.appendLog({
+              user_id: user.id,
+              user_name: user.name,
+              action: 'VERIFY',
+              entity_type: 'SECURITY_BOLA',
+              entity_id: material.id,
+              details: `BOLA denied file download for material "${material.title}" (${rawFilename}).`
+            });
+            return res.status(403).json({
+              error: 'Access denied: You do not have permission to access this file',
+              code: 'OBJECT_ACCESS_DENIED'
+            });
+          }
+        } else {
+          const projectIds = material.project_ids ?? [];
+          const projects = await Promise.all(projectIds.map(projectId => repositories.projects.findById(projectId)));
+          const isPublic = projectIds.length > 0 && projects.every(project => project?.is_public === true);
+          if (!isPublic) {
+            return res.status(401).json({
+              error: 'Authentication required to access this file',
+              code: 'AUTH_REQUIRED'
+            });
+          }
+        }
+
+        return res.sendFile(safePath);
+      } catch (error) {
+        return next(error);
       }
-    } else {
-      // Unauthenticated access allowed ONLY if material is linked exclusively to public projects
-      const isPublic = material.project_ids && material.project_ids.length > 0 && material.project_ids.every(pId => {
-        const p = state.projects.find(proj => proj.id === pId);
-        return p && p.is_public;
-      });
-      if (!isPublic) {
-        return res.status(401).json({
-          error: 'Authentication required to access this file',
-          code: 'AUTH_REQUIRED'
-        });
-      }
-    }
-
-    res.sendFile(safePath);
-  });
+    });
 
   // Mount Scientific API router FIRST
   app.use('/api', apiRouter);
 
-  // Health check endpoint
-  app.get('/api/health', (req, res) => {
-    res.json({
-      status: 'ok',
-      service: 'NutriBodySim Scientific Computation Engine',
-      version: '1.0.0',
-      timestamp: new Date().toISOString()
+  app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
+    if (res.headersSent) return next(error);
+    const candidate = error instanceof Error
+      ? error as Error & { statusCode?: number; code?: string; cause?: { code?: string } }
+      : undefined;
+    const databaseCode = candidate?.code ?? candidate?.cause?.code;
+    const databaseUnavailable = Boolean(
+      databaseCode && (/^08/.test(databaseCode) || ['ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND'].includes(databaseCode))
+    );
+    const statusCode = databaseUnavailable
+      ? 503
+      : candidate?.statusCode && candidate.statusCode >= 400 && candidate.statusCode < 600
+        ? candidate.statusCode
+        : 500;
+    console.error(`[NutriBodySim] Request failed (${databaseUnavailable ? 'database unavailable' : `HTTP ${statusCode}`}).`);
+    return res.status(statusCode).json({
+      error: databaseUnavailable ? 'Database service unavailable.' : statusCode === 500 ? 'Internal server error.' : candidate?.message,
+      code: databaseUnavailable ? 'DATABASE_UNAVAILABLE' : statusCode === 500 ? 'INTERNAL_ERROR' : 'REQUEST_FAILED'
+    });
+  });
+
+  app.get('/health', async (_req, res) => {
+    const health = await runtime.healthCheck();
+    return res.status(health.ok ? 200 : 503).json({
+      status: health.ok ? 'ok' : 'degraded',
+      provider: health.provider,
+      database: health.databaseName ?? null,
+      schema: health.schemaName ?? null,
+      branch_id: health.branchId ?? null,
+      tls_verified: health.tlsVerified ?? null
     });
   });
 
   // Vite middleware in development vs static SPA in production
+  let vite: Awaited<ReturnType<typeof createViteServer>> | undefined;
   if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
+    vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
@@ -119,12 +164,41 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[NutriBodySim Engine v1.0] Server running on http://0.0.0.0:${PORT}`);
+  const httpServer: Server = await new Promise((resolve, reject) => {
+    const server = app.listen(port, '0.0.0.0', () => resolve(server));
+    server.once('error', reject);
+  });
+  console.log(`[NutriBodySim Engine v1.0] Server running on http://0.0.0.0:${port}`);
+
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[NutriBodySim] Received ${signal}; draining requests.`);
+    await closeHttpServer(httpServer);
+    await vite?.close();
+    await runtime.close();
+  };
+  process.once('SIGINT', () => void shutdown('SIGINT').catch((error) => {
+    console.error('[NutriBodySim] Graceful shutdown failed:', error);
+    process.exitCode = 1;
+  }));
+  process.once('SIGTERM', () => void shutdown('SIGTERM').catch((error) => {
+    console.error('[NutriBodySim] Graceful shutdown failed:', error);
+    process.exitCode = 1;
+  }));
+}
+
+function closeHttpServer(server: Server): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
   });
 }
 
-startServer().catch(err => {
-  console.error('Fatal error during NutriBodySim server startup:', err);
+startServer().catch(async (err) => {
+  console.error(`[NutriBodySim] Fatal server startup failure (${err instanceof Error ? err.name : 'unknown error'}).`);
+  await closeRuntimeDatabase().catch((closeError) => {
+    console.error(`[NutriBodySim] Runtime cleanup failed (${closeError instanceof Error ? closeError.name : 'unknown error'}).`);
+  });
   process.exit(1);
 });

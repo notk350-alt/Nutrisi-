@@ -78,6 +78,9 @@ class ApiClient {
   }
 
   public async acquireSessionToken(preferredUserId?: string): Promise<string | null> {
+    if (!import.meta.env.DEV) {
+      return null;
+    }
     if (this.sessionPromise) {
       return this.sessionPromise;
     }
@@ -149,18 +152,88 @@ class ApiClient {
       }
     }
 
-    // Default demo initialization
+    if (!import.meta.env.DEV) {
+      return null;
+    }
+
     try {
       const token = await this.acquireSessionToken('usr_researcher');
       if (token && this.currentUser) {
         return this.currentUser;
       }
-      const res = await this.demoLogin('usr_researcher');
-      return res.user;
-    } catch (err) {
-      console.warn('Initial demo session acquisition failed:', err);
+    } catch {
       return null;
     }
+    return null;
+  }
+
+  async signInWithGoogle(): Promise<User> {
+    if (typeof window === 'undefined') {
+      throw new Error('Google sign-in requires a browser window.');
+    }
+
+    const popup = window.open('about:blank', 'nutribodysim-google-login', 'popup,width=520,height=640');
+    if (!popup) {
+      throw new Error('The Google sign-in popup was blocked.');
+    }
+
+    return new Promise<User>((resolve, reject) => {
+      let completed = false;
+      let closeCheck: number | undefined;
+      let timeout: number | undefined;
+
+      const cleanup = () => {
+        window.removeEventListener('message', onMessage);
+        if (closeCheck !== undefined) window.clearInterval(closeCheck);
+        if (timeout !== undefined) window.clearTimeout(timeout);
+      };
+
+      const fail = (error: Error) => {
+        if (completed) return;
+        completed = true;
+        cleanup();
+        if (!popup.closed) popup.close();
+        reject(error);
+      };
+
+      const onMessage = (event: MessageEvent) => {
+        if (event.origin !== window.location.origin || event.source !== popup) return;
+        const message = event.data as { type?: string; token?: string; user?: User; code?: string };
+        if (message?.type === 'GOOGLE_AUTH_ERROR') {
+          fail(new Error(`Google sign-in failed (${message.code || 'UNKNOWN'}).`));
+          return;
+        }
+        if (message?.type !== 'GOOGLE_AUTH_SUCCESS') return;
+        if (typeof message.token !== 'string' || typeof message.user?.id !== 'string') {
+          fail(new Error('Google sign-in returned an invalid session.'));
+          return;
+        }
+
+        completed = true;
+        cleanup();
+        this.setSession(message.token, message.user);
+        resolve(message.user);
+      };
+
+      window.addEventListener('message', onMessage);
+      closeCheck = window.setInterval(() => {
+        if (popup.closed) fail(new Error('Google sign-in was cancelled.'));
+      }, 400);
+      timeout = window.setTimeout(() => fail(new Error('Google sign-in timed out.')), 10 * 60 * 1000);
+
+      void (async () => {
+        const response = await fetch('/api/auth/google/url', { headers: { Accept: 'application/json' } });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || typeof data.url !== 'string') {
+          throw new Error(data.error || 'Google sign-in is unavailable.');
+        }
+        const authorizationUrl = new URL(data.url);
+        if (authorizationUrl.origin !== 'https://accounts.google.com') {
+          throw new Error('The Google authorization destination is not trusted.');
+        }
+        if (!popup.closed) popup.location.assign(authorizationUrl.toString());
+      })().catch(error => fail(error instanceof Error ? error : new Error('Google sign-in is unavailable.')));
+    });
   }
 
   async demoLogin(userId: string): Promise<{ token: string; user: User; expires_at: number }> {

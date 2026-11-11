@@ -120,9 +120,14 @@ export class JsonTransactionContext implements ITransactionContext {
     if (this.rolledBack) {
       throw new Error(`Cannot commit transaction ${this.transactionId} because it was rolled back.`);
     }
-    // Apply isolated working state atomically back to the main DatabaseStore
+    const previousState = this.store.getState();
     this.store.setState(this.workingState);
-    this.store.save();
+    try {
+      this.store.save();
+    } catch (error) {
+      this.store.setState(previousState);
+      throw error;
+    }
     this.committed = true;
   }
 
@@ -151,26 +156,39 @@ export class JsonTransactionContext implements ITransactionContext {
 }
 
 export class JsonUnitOfWork implements IUnitOfWork {
+  private transactionTail: Promise<void> = Promise.resolve();
+
   constructor(private readonly store: DatabaseStore) {}
 
   async runInTransaction<T>(work: (tx: ITransactionContext) => Promise<T>): Promise<T> {
-    const tx = new JsonTransactionContext(this.store);
+    const previousTransaction = this.transactionTail;
+    let releaseTransaction: () => void = () => undefined;
+    this.transactionTail = new Promise<void>(resolve => {
+      releaseTransaction = resolve;
+    });
+    await previousTransaction;
+
     try {
-      const result = await work(tx);
-      if (tx.isRolledBack()) {
-        throw new Error(`Transaction ${tx.transactionId} was explicitly rolled back by caller.`);
+      const tx = new JsonTransactionContext(this.store);
+      try {
+        const result = await work(tx);
+        if (tx.isRolledBack()) {
+          throw new Error(`Transaction ${tx.transactionId} was explicitly rolled back by caller.`);
+        }
+        if (!tx.isCommitted()) {
+          await tx.commit();
+        }
+        return result;
+      } catch (err) {
+        if (!tx.isCommitted() && !tx.isRolledBack()) {
+          try {
+            await tx.rollback();
+          } catch {}
+        }
+        throw err;
       }
-      if (!tx.isCommitted()) {
-        await tx.commit();
-      }
-      return result;
-    } catch (err) {
-      if (!tx.isCommitted() && !tx.isRolledBack()) {
-        try {
-          await tx.rollback();
-        } catch {}
-      }
-      throw err;
+    } finally {
+      releaseTransaction();
     }
   }
 }
@@ -325,6 +343,9 @@ export class JsonRoleRequestRepository extends BaseJsonRepository implements IRo
   async create(request: RoleRequest, tx?: ITransactionContext): Promise<RoleRequest> {
     const state = this.getState(tx);
     const cloned = structuredClone(request);
+    cloned.reviewed_by ??= null;
+    cloned.reviewed_at ??= null;
+    cloned.review_reason ??= null;
     state.role_requests.push(cloned);
     this.persist(tx);
     return structuredClone(cloned);
@@ -334,6 +355,10 @@ export class JsonRoleRequestRepository extends BaseJsonRepository implements IRo
     const state = this.getState(tx);
     const req = state.role_requests.find(r => r.request_id === requestId);
     return req ? structuredClone(req) : null;
+  }
+
+  async listAll(tx?: ITransactionContext): Promise<RoleRequest[]> {
+    return structuredClone(this.getState(tx).role_requests);
   }
 
   async listPending(tx?: ITransactionContext): Promise<RoleRequest[]> {
@@ -359,12 +384,20 @@ export class JsonRoleRequestRepository extends BaseJsonRepository implements IRo
     status: ApprovalStatus,
     reviewerId: string,
     reviewReason?: string | null,
-    tx?: ITransactionContext
+    tx?: ITransactionContext,
+    expectedStatus?: ApprovalStatus
   ): Promise<RoleRequest> {
     const state = this.getState(tx);
     const idx = state.role_requests.findIndex(r => r.request_id === requestId);
     if (idx === -1) {
       throw new Error(`Role request not found: ${requestId}`);
+    }
+    if (expectedStatus && state.role_requests[idx].approval_status !== expectedStatus) {
+      throw Object.assign(new Error(`Role request is already finalized with status '${state.role_requests[idx].approval_status}'.`), {
+        statusCode: 409,
+        code: 'ALREADY_FINALIZED',
+        current_status: state.role_requests[idx].approval_status
+      });
     }
     const now = new Date().toISOString();
     const updated: RoleRequest = {
@@ -389,6 +422,10 @@ export class JsonProjectRepository extends BaseJsonRepository implements IProjec
     const state = this.getState(tx);
     const project = state.projects.find(p => p.id === id);
     return project ? structuredClone(project) : null;
+  }
+
+  async listAll(tx?: ITransactionContext): Promise<Project[]> {
+    return structuredClone(this.getState(tx).projects);
   }
 
   async listPublic(tx?: ITransactionContext): Promise<Project[]> {
@@ -446,6 +483,18 @@ export class JsonProjectRepository extends BaseJsonRepository implements IProjec
 }
 
 export class JsonMembershipRepository extends BaseJsonRepository implements IMembershipRepository {
+  async getTeams(tx?: ITransactionContext): Promise<Team[]> {
+    return structuredClone(this.getState(tx).teams);
+  }
+
+  async createTeam(team: Team, tx?: ITransactionContext): Promise<Team> {
+    const state = this.getState(tx);
+    const cloned = structuredClone(team);
+    state.teams.push(cloned);
+    this.persist(tx);
+    return structuredClone(cloned);
+  }
+
   async getProjectMembers(projectId: string, tx?: ITransactionContext): Promise<ProjectMember[]> {
     const state = this.getState(tx);
     return structuredClone(state.project_members.filter(pm => pm.project_id === projectId));
@@ -458,7 +507,9 @@ export class JsonMembershipRepository extends BaseJsonRepository implements IMem
       pm => pm.project_id === member.project_id && pm.user_id === member.user_id
     );
     if (existingIdx !== -1) {
-      state.project_members[existingIdx] = cloned;
+      state.project_members[existingIdx].role = cloned.role;
+      this.persist(tx);
+      return structuredClone(state.project_members[existingIdx]);
     } else {
       state.project_members.push(cloned);
     }
@@ -495,7 +546,9 @@ export class JsonMembershipRepository extends BaseJsonRepository implements IMem
       tm => tm.team_id === member.team_id && tm.user_id === member.user_id
     );
     if (existingIdx !== -1) {
-      state.team_members[existingIdx] = cloned;
+      state.team_members[existingIdx].role = cloned.role;
+      this.persist(tx);
+      return structuredClone(state.team_members[existingIdx]);
     } else {
       state.team_members.push(cloned);
     }
@@ -566,6 +619,18 @@ export class JsonMaterialRepository extends BaseJsonRepository implements IMater
     return structuredClone(updated);
   }
 
+  async linkToProject(materialId: string, projectId: string, tx?: ITransactionContext): Promise<Material | null> {
+    const state = this.getState(tx);
+    const material = state.materials.find(item => item.id === materialId);
+    if (!material) return null;
+    if (!material.project_ids.includes(projectId)) {
+      material.project_ids.push(projectId);
+      material.updated_at = new Date().toISOString();
+      this.persist(tx);
+    }
+    return structuredClone(material);
+  }
+
   async delete(id: string, tx?: ITransactionContext): Promise<boolean> {
     const state = this.getState(tx);
     const idx = state.materials.findIndex(m => m.id === id);
@@ -608,6 +673,12 @@ export class JsonMaterialRepository extends BaseJsonRepository implements IMater
     );
   }
 
+  async getAllBookmarks(materialId?: string, tx?: ITransactionContext): Promise<Bookmark[]> {
+    return structuredClone(this.getState(tx).bookmarks.filter(bookmark =>
+      !materialId || bookmark.material_id === materialId
+    ));
+  }
+
   async saveBookmark(bookmark: Bookmark, tx?: ITransactionContext): Promise<Bookmark> {
     const state = this.getState(tx);
     const idx = state.bookmarks.findIndex(b => b.id === bookmark.id);
@@ -635,6 +706,12 @@ export class JsonMaterialRepository extends BaseJsonRepository implements IMater
     return structuredClone(
       state.highlights.filter(h => h.user_id === userId && (!materialId || h.material_id === materialId))
     );
+  }
+
+  async getAllHighlights(materialId?: string, tx?: ITransactionContext): Promise<Highlight[]> {
+    return structuredClone(this.getState(tx).highlights.filter(highlight =>
+      !materialId || highlight.material_id === materialId
+    ));
   }
 
   async saveHighlight(highlight: Highlight, tx?: ITransactionContext): Promise<Highlight> {
@@ -671,6 +748,10 @@ export class JsonMaterialRepository extends BaseJsonRepository implements IMater
     );
   }
 
+  async getAllNotes(tx?: ITransactionContext): Promise<Note[]> {
+    return structuredClone(this.getState(tx).notes);
+  }
+
   async saveNote(note: Note, tx?: ITransactionContext): Promise<Note> {
     const state = this.getState(tx);
     const idx = state.notes.findIndex(n => n.id === note.id);
@@ -703,6 +784,10 @@ export class JsonDatasetRepository extends BaseJsonRepository implements IDatase
     const state = this.getState(tx);
     const ds = state.datasets.find(d => d.id === id);
     return ds ? structuredClone(ds) : null;
+  }
+
+  async listAll(tx?: ITransactionContext): Promise<Dataset[]> {
+    return structuredClone(this.getState(tx).datasets);
   }
 
   async listByProject(projectId: string, tx?: ITransactionContext): Promise<Dataset[]> {
@@ -781,6 +866,13 @@ export class JsonScientificRegistryRepository extends BaseJsonRepository impleme
     return structuredClone(this.getState(tx).variables);
   }
 
+  async createVariable(variable: ScientificVariable, tx?: ITransactionContext): Promise<ScientificVariable> {
+    const cloned = structuredClone(variable);
+    this.getState(tx).variables.push(cloned);
+    this.persist(tx);
+    return structuredClone(cloned);
+  }
+
   async getVariableById(id: string, tx?: ITransactionContext): Promise<ScientificVariable | null> {
     const v = this.getState(tx).variables.find(item => item.variable_id === id);
     return v ? structuredClone(v) : null;
@@ -788,6 +880,13 @@ export class JsonScientificRegistryRepository extends BaseJsonRepository impleme
 
   async getParameters(tx?: ITransactionContext): Promise<ScientificParameter[]> {
     return structuredClone(this.getState(tx).parameters);
+  }
+
+  async createParameter(parameter: ScientificParameter, tx?: ITransactionContext): Promise<ScientificParameter> {
+    const cloned = structuredClone(parameter);
+    this.getState(tx).parameters.push(cloned);
+    this.persist(tx);
+    return structuredClone(cloned);
   }
 
   async getParameterById(id: string, tx?: ITransactionContext): Promise<ScientificParameter | null> {
@@ -799,6 +898,13 @@ export class JsonScientificRegistryRepository extends BaseJsonRepository impleme
     return structuredClone(this.getState(tx).formulas);
   }
 
+  async createFormula(formula: ScientificFormula, tx?: ITransactionContext): Promise<ScientificFormula> {
+    const cloned = structuredClone(formula);
+    this.getState(tx).formulas.push(cloned);
+    this.persist(tx);
+    return structuredClone(cloned);
+  }
+
   async getFormulaById(id: string, tx?: ITransactionContext): Promise<ScientificFormula | null> {
     const f = this.getState(tx).formulas.find(item => item.formula_id === id);
     return f ? structuredClone(f) : null;
@@ -808,6 +914,13 @@ export class JsonScientificRegistryRepository extends BaseJsonRepository impleme
     return structuredClone(this.getState(tx).models);
   }
 
+  async createModel(model: ScientificModel, tx?: ITransactionContext): Promise<ScientificModel> {
+    const cloned = structuredClone(model);
+    this.getState(tx).models.push(cloned);
+    this.persist(tx);
+    return structuredClone(cloned);
+  }
+
   async getModelById(id: string, tx?: ITransactionContext): Promise<ScientificModel | null> {
     const m = this.getState(tx).models.find(item => item.model_id === id);
     return m ? structuredClone(m) : null;
@@ -815,6 +928,13 @@ export class JsonScientificRegistryRepository extends BaseJsonRepository impleme
 
   async getReferences(tx?: ITransactionContext): Promise<ScientificReference[]> {
     return structuredClone(this.getState(tx).references);
+  }
+
+  async createReference(reference: ScientificReference, tx?: ITransactionContext): Promise<ScientificReference> {
+    const cloned = structuredClone(reference);
+    this.getState(tx).references.push(cloned);
+    this.persist(tx);
+    return structuredClone(cloned);
   }
 
   async getReferenceById(id: string, tx?: ITransactionContext): Promise<ScientificReference | null> {
@@ -846,6 +966,39 @@ export class JsonScientificRegistryRepository extends BaseJsonRepository impleme
 // ============================================================================
 
 export class JsonResearchArtifactRepository extends BaseJsonRepository implements IResearchArtifactRepository {
+  async getAllAnalyses(tx?: ITransactionContext): Promise<StatisticsAnalysis[]> {
+    return structuredClone(this.getState(tx).statistics_analyses);
+  }
+
+  async getAllCharts(tx?: ITransactionContext): Promise<ChartRecord[]> {
+    return structuredClone(this.getState(tx).charts);
+  }
+
+  async getAllNotebooks(tx?: ITransactionContext): Promise<NutriNotebook[]> {
+    return structuredClone(this.getState(tx).notebooks);
+  }
+
+  async getAllExperiments(tx?: ITransactionContext): Promise<Experiment[]> {
+    return structuredClone(this.getState(tx).experiments);
+  }
+
+  async getAllCodeExecutions(tx?: ITransactionContext): Promise<CodeExecutionRecord[]> {
+    return structuredClone(this.getState(tx).code_executions);
+  }
+
+  async getAllProvenanceRecords(tx?: ITransactionContext): Promise<ProvenanceRecord[]> {
+    return structuredClone(this.getState(tx).provenance_records);
+  }
+
+  async getNotebookCells(notebookId: string, tx?: ITransactionContext): Promise<NotebookCell[]> {
+    return structuredClone(this.getState(tx).notebook_cells.filter(cell => cell.notebook_id === notebookId));
+  }
+
+  async findNotebookCellById(cellId: string, tx?: ITransactionContext): Promise<NotebookCell | null> {
+    const cell = this.getState(tx).notebook_cells.find(candidate => candidate.id === cellId);
+    return cell ? structuredClone(cell) : null;
+  }
+
   async getAnalysesByProject(projectId: string, tx?: ITransactionContext): Promise<StatisticsAnalysis[]> {
     return structuredClone(this.getState(tx).statistics_analyses.filter(a => a.project_id === projectId));
   }
@@ -1017,9 +1170,11 @@ export class JsonAuditLogRepository extends BaseJsonRepository implements IAudit
       entity_type: logData.entity_type,
       entity_id: logData.entity_id,
       details: logData.details,
-      ip_address: logData.ip_address
+      ip_address: logData.ip_address,
+      metadata: logData.metadata
     };
-    state.audit_logs.push(fullLog);
+    state.audit_logs.unshift(fullLog);
+    if (state.audit_logs.length > 1000) state.audit_logs.pop();
     this.persist(tx);
     return structuredClone(fullLog);
   }

@@ -1,0 +1,1985 @@
+{
+  "users": [
+    {
+      "id": "usr_researcher",
+      "email": "researcher@nutribodysim.org",
+      "name": "Dr. Elena Vance, PhD",
+      "role": "Researcher",
+      "permissions": [
+        "VIEW",
+        "USE",
+        "CREATE",
+        "CLONE",
+        "EDIT",
+        "SHARE",
+        "PUBLISH"
+      ],
+      "organization": "Laboratory of Computational Physiology",
+      "created_at": "2026-09-21T10:00:00.000Z",
+      "last_login_at": "2026-09-21T10:00:00.000Z",
+      "account_status": "ACTIVE",
+      "token_version": 1,
+      "email_verified": true,
+      "provider": "local",
+      "provider_subject_id": "local_usr_researcher",
+      "display_name": "Dr. Elena Vance, PhD",
+      "updated_at": "2026-09-21T10:00:00.000Z"
+    },
+    {
+      "id": "usr_lecturer",
+      "email": "lecturer@nutribodysim.org",
+      "name": "Prof. Marcus Brody",
+      "role": "Lecturer",
+      "permissions": [
+        "VIEW",
+        "USE",
+        "CREATE",
+        "CLONE",
+        "EDIT",
+        "SHARE",
+        "PUBLISH"
+      ],
+      "organization": "Faculty of Health Sciences",
+      "created_at": "2026-09-21T10:00:00.000Z",
+      "last_login_at": "2026-09-21T10:00:00.000Z",
+      "account_status": "ACTIVE",
+      "token_version": 1,
+      "email_verified": true,
+      "provider": "local",
+      "provider_subject_id": "local_usr_lecturer",
+      "display_name": "Prof. Marcus Brody",
+      "updated_at": "2026-09-21T10:00:00.000Z"
+    },
+    {
+      "id": "usr_student",
+      "email": "student@nutribodysim.org",
+      "name": "Alex Chen",
+      "role": "Student",
+      "permissions": [
+        "VIEW",
+        "USE",
+        "CREATE",
+        "CLONE"
+      ],
+      "organization": "Graduate School of Nutrition & Informatics",
+      "created_at": "2026-09-21T10:00:00.000Z",
+      "last_login_at": "2026-09-21T10:00:00.000Z",
+      "account_status": "ACTIVE",
+      "token_version": 1,
+      "email_verified": true,
+      "provider": "local",
+      "provider_subject_id": "local_usr_student",
+      "display_name": "Alex Chen",
+      "updated_at": "2026-09-21T10:00:00.000Z"
+    },
+    {
+      "id": "usr_admin",
+      "email": "admin@nutribodysim.org",
+      "name": "System Administrator",
+      "role": "Admin",
+      "permissions": [
+        "VIEW",
+        "USE",
+        "CREATE",
+        "CLONE",
+        "EDIT",
+        "DELETE",
+        "SHARE",
+        "PUBLISH",
+        "VERIFY",
+        "ADMIN"
+      ],
+      "organization": "NutriBodySim Scientific Governance Board",
+      "created_at": "2026-09-21T10:00:00.000Z",
+      "last_login_at": "2026-09-21T10:00:00.000Z",
+      "account_status": "ACTIVE",
+      "token_version": 1,
+      "email_verified": true,
+      "provider": "local",
+      "provider_subject_id": "local_usr_admin",
+      "display_name": "System Administrator",
+      "updated_at": "2026-09-21T10:00:00.000Z"
+    }
+  ],
+  "teams": [
+    {
+      "id": "team_metabolic_lab",
+      "name": "Metabolic Kinetics Research Group",
+      "description": "Collaborative team investigating anthropometric scaling and bioenergetic rate equations.",
+      "owner_id": "usr_researcher",
+      "created_at": "2026-09-21T10:00:00.000Z"
+    }
+  ],
+  "team_members": [
+    {
+      "id": "tm_1",
+      "team_id": "team_metabolic_lab",
+      "user_id": "usr_researcher",
+      "role": "Owner",
+      "joined_at": "2026-09-21T10:00:00.000Z"
+    },
+    {
+      "id": "tm_2",
+      "team_id": "team_metabolic_lab",
+      "user_id": "usr_lecturer",
+      "role": "Editor",
+      "joined_at": "2026-09-21T10:00:00.000Z"
+    },
+    {
+      "id": "tm_3",
+      "team_id": "team_metabolic_lab",
+      "user_id": "usr_student",
+      "role": "Collaborator",
+      "joined_at": "2026-09-21T10:00:00.000Z"
+    }
+  ],
+  "projects": [
+    {
+      "id": "proj_metabolic_v1",
+      "name": "Bioenergetic & Anthropometric Benchmark Study",
+      "description": "Reference project evaluating formula sensitivity, unit transformation fidelity, and reproducibility across human cohorts.",
+      "type": "Research",
+      "owner_id": "usr_researcher",
+      "team_id": "team_metabolic_lab",
+      "is_public": true,
+      "tags": [
+        "anthropometry",
+        "metabolism",
+        "verification",
+        "benchmarks"
+      ],
+      "created_at": "2026-09-21T10:00:00.000Z",
+      "updated_at": "2026-09-21T10:00:00.000Z"
+    },
+    {
+      "id": "proj_academic_lab",
+      "name": "Nutritional Physiology 401 Assignment Lab",
+      "description": "Student course workspace for data validation, exploratory statistics, and model parameter sensitivity tests.",
+      "type": "Academic",
+      "owner_id": "usr_lecturer",
+      "is_public": false,
+      "tags": [
+        "education",
+        "coursework",
+        "statistics"
+      ],
+      "created_at": "2026-09-21T10:00:00.000Z",
+      "updated_at": "2026-09-21T10:00:00.000Z"
+    }
+  ],
+  "project_members": [
+    {
+      "id": "pm_1",
+      "project_id": "proj_metabolic_v1",
+      "user_id": "usr_researcher",
+      "role": "Owner",
+      "joined_at": "2026-09-21T10:00:00.000Z"
+    },
+    {
+      "id": "pm_2",
+      "project_id": "proj_metabolic_v1",
+      "user_id": "usr_student",
+      "role": "Collaborator",
+      "joined_at": "2026-09-21T10:00:00.000Z"
+    },
+    {
+      "id": "pm_3",
+      "project_id": "proj_academic_lab",
+      "user_id": "usr_lecturer",
+      "role": "Owner",
+      "joined_at": "2026-09-21T10:00:00.000Z"
+    },
+    {
+      "id": "pm_4",
+      "project_id": "proj_academic_lab",
+      "user_id": "usr_student",
+      "role": "Collaborator",
+      "joined_at": "2026-09-21T10:00:00.000Z"
+    }
+  ],
+  "materials": [
+    {
+      "id": "mat_handbook_001",
+      "title": "Fundamentals of Computational Nutrition & Physiology: Handbook",
+      "author": "Vance, E. & Brody, M.",
+      "subject": "Physiology & Bioenergetics",
+      "type": "TXT",
+      "description": "Comprehensive academic reference text covering allometric scaling, unit normalization, and computational energy balance.",
+      "year": 2025,
+      "publisher": "NutriBodySim Academic Press",
+      "language": "en",
+      "source": "Institutional Faculty Archive",
+      "license": "CC-BY-NC 4.0",
+      "tags": [
+        "physiology",
+        "bioenergetics",
+        "allometry",
+        "reference"
+      ],
+      "version": "1.2.0",
+      "uploaded_by": "usr_researcher",
+      "file_path": "sample_physiology_manual.txt",
+      "file_size_bytes": 2218,
+      "mime_type": "text/plain",
+      "file_hash": "2240fee82115960d42fa62bd076403b5af360f3f6df20f702d910091a7e4bada",
+      "project_ids": [
+        "proj_metabolic_v1",
+        "proj_academic_lab"
+      ],
+      "created_at": "2026-09-21T10:00:00.000Z",
+      "updated_at": "2026-09-21T10:00:00.000Z"
+    },
+    {
+      "id": "mat_pdf_sample",
+      "title": "WHO Technical Report on Nutritional Status Guidelines (Reference Specimen)",
+      "author": "World Health Organization Expert Consultation",
+      "subject": "Nutritional Assessment",
+      "type": "PDF",
+      "description": "Standard technical monograph detailing anthropometric classification limits and cut-off points.",
+      "year": 2024,
+      "publisher": "World Health Organization",
+      "language": "en",
+      "url": "https://iris.who.int/handle/10665/37000",
+      "license": "Public Domain / Open Access",
+      "tags": [
+        "anthropometry",
+        "standards",
+        "WHO",
+        "clinical"
+      ],
+      "version": "2.0.0",
+      "uploaded_by": "usr_lecturer",
+      "file_path": "sample_physiology_manual.txt",
+      "file_size_bytes": 48920,
+      "mime_type": "application/pdf",
+      "file_hash": "c8812a39b4f99581ec01c712808298ad8e2e6c5bb9312019c011e400192a818e",
+      "project_ids": [
+        "proj_metabolic_v1"
+      ],
+      "created_at": "2026-09-21T10:00:00.000Z",
+      "updated_at": "2026-09-21T10:00:00.000Z"
+    }
+  ],
+  "material_collections": [
+    {
+      "id": "col_anthropometry",
+      "name": "Anthropometry & Energy Balance",
+      "description": "Core reading materials and scientific monographs on human dimensions and metabolic energy.",
+      "color": "#2563eb",
+      "material_ids": [
+        "mat_handbook_001",
+        "mat_pdf_sample"
+      ],
+      "created_by": "usr_researcher",
+      "created_at": "2026-09-21T10:00:00.000Z"
+    }
+  ],
+  "reading_progress": [
+    {
+      "id": "rp_1",
+      "user_id": "usr_student",
+      "material_id": "mat_handbook_001",
+      "last_page": 2,
+      "total_pages": 5,
+      "progress_pct": 40,
+      "scroll_position": 240,
+      "last_accessed": "2026-09-21T10:00:00.000Z"
+    }
+  ],
+  "bookmarks": [
+    {
+      "id": "bm_1",
+      "user_id": "usr_student",
+      "material_id": "mat_handbook_001",
+      "page": 1,
+      "title": "Chapter 1: The Dimensional Foundation of Human Stature",
+      "created_at": "2026-09-21T10:00:00.000Z"
+    }
+  ],
+  "highlights": [
+    {
+      "id": "hl_1",
+      "user_id": "usr_researcher",
+      "material_id": "mat_handbook_001",
+      "page": 1,
+      "selected_text": "allometric analyses across diverse cohorts demonstrate that the true empirical scaling exponent fluctuates between 1.8 and 2.4",
+      "color": "yellow",
+      "created_at": "2026-09-21T10:00:00.000Z"
+    }
+  ],
+  "notes": [
+    {
+      "id": "note_1",
+      "user_id": "usr_researcher",
+      "title": "Parameter Exponent Justification",
+      "content": "Note for parameter PARAM_DEMO_HEIGHT_EXPONENT: allow calibration between 1.8 and 2.4 in experimental models.",
+      "material_id": "mat_handbook_001",
+      "page": 1,
+      "selected_text": "scaling exponent fluctuates between 1.8 and 2.4",
+      "project_id": "proj_metabolic_v1",
+      "created_at": "2026-09-21T10:00:00.000Z",
+      "updated_at": "2026-09-21T10:00:00.000Z"
+    }
+  ],
+  "units": [
+    {
+      "unit_id": "UNIT_KG",
+      "symbol": "kg",
+      "name": "Kilogram",
+      "measurement_type": "mass",
+      "base_unit": "kg",
+      "to_base_multiplier": 1
+    },
+    {
+      "unit_id": "UNIT_G",
+      "symbol": "g",
+      "name": "Gram",
+      "measurement_type": "mass",
+      "base_unit": "kg",
+      "to_base_multiplier": 0.001
+    },
+    {
+      "unit_id": "UNIT_MG",
+      "symbol": "mg",
+      "name": "Milligram",
+      "measurement_type": "mass",
+      "base_unit": "kg",
+      "to_base_multiplier": 0.000001
+    },
+    {
+      "unit_id": "UNIT_LB",
+      "symbol": "lb",
+      "name": "Pound",
+      "measurement_type": "mass",
+      "base_unit": "kg",
+      "to_base_multiplier": 0.45359237
+    },
+    {
+      "unit_id": "UNIT_M",
+      "symbol": "m",
+      "name": "Meter",
+      "measurement_type": "length",
+      "base_unit": "m",
+      "to_base_multiplier": 1
+    },
+    {
+      "unit_id": "UNIT_CM",
+      "symbol": "cm",
+      "name": "Centimeter",
+      "measurement_type": "length",
+      "base_unit": "m",
+      "to_base_multiplier": 0.01
+    },
+    {
+      "unit_id": "UNIT_MM",
+      "symbol": "mm",
+      "name": "Millimeter",
+      "measurement_type": "length",
+      "base_unit": "m",
+      "to_base_multiplier": 0.001
+    },
+    {
+      "unit_id": "UNIT_IN",
+      "symbol": "in",
+      "name": "Inch",
+      "measurement_type": "length",
+      "base_unit": "m",
+      "to_base_multiplier": 0.0254
+    },
+    {
+      "unit_id": "UNIT_FT",
+      "symbol": "ft",
+      "name": "Foot",
+      "measurement_type": "length",
+      "base_unit": "m",
+      "to_base_multiplier": 0.3048
+    },
+    {
+      "unit_id": "UNIT_S",
+      "symbol": "s",
+      "name": "Second",
+      "measurement_type": "time",
+      "base_unit": "s",
+      "to_base_multiplier": 1
+    },
+    {
+      "unit_id": "UNIT_MIN",
+      "symbol": "min",
+      "name": "Minute",
+      "measurement_type": "time",
+      "base_unit": "s",
+      "to_base_multiplier": 60
+    },
+    {
+      "unit_id": "UNIT_H",
+      "symbol": "h",
+      "name": "Hour",
+      "measurement_type": "time",
+      "base_unit": "s",
+      "to_base_multiplier": 3600
+    },
+    {
+      "unit_id": "UNIT_DAY",
+      "symbol": "day",
+      "name": "Day",
+      "measurement_type": "time",
+      "base_unit": "s",
+      "to_base_multiplier": 86400
+    },
+    {
+      "unit_id": "UNIT_YEAR",
+      "symbol": "yr",
+      "name": "Year",
+      "measurement_type": "time",
+      "base_unit": "s",
+      "to_base_multiplier": 31536000
+    },
+    {
+      "unit_id": "UNIT_J",
+      "symbol": "J",
+      "name": "Joule",
+      "measurement_type": "energy",
+      "base_unit": "J",
+      "to_base_multiplier": 1
+    },
+    {
+      "unit_id": "UNIT_KJ",
+      "symbol": "kJ",
+      "name": "Kilojoule",
+      "measurement_type": "energy",
+      "base_unit": "J",
+      "to_base_multiplier": 1000
+    },
+    {
+      "unit_id": "UNIT_KCAL",
+      "symbol": "kcal",
+      "name": "Kilocalorie (Cal)",
+      "measurement_type": "energy",
+      "base_unit": "J",
+      "to_base_multiplier": 4184
+    },
+    {
+      "unit_id": "UNIT_CAL",
+      "symbol": "cal",
+      "name": "Calorie",
+      "measurement_type": "energy",
+      "base_unit": "J",
+      "to_base_multiplier": 4.184
+    },
+    {
+      "unit_id": "UNIT_L",
+      "symbol": "L",
+      "name": "Liter",
+      "measurement_type": "volume",
+      "base_unit": "L",
+      "to_base_multiplier": 1
+    },
+    {
+      "unit_id": "UNIT_ML",
+      "symbol": "mL",
+      "name": "Milliliter",
+      "measurement_type": "volume",
+      "base_unit": "L",
+      "to_base_multiplier": 0.001
+    },
+    {
+      "unit_id": "UNIT_DL",
+      "symbol": "dL",
+      "name": "Deciliter",
+      "measurement_type": "volume",
+      "base_unit": "L",
+      "to_base_multiplier": 0.1
+    },
+    {
+      "unit_id": "UNIT_K",
+      "symbol": "K",
+      "name": "Kelvin",
+      "measurement_type": "temperature",
+      "base_unit": "K",
+      "to_base_multiplier": 1,
+      "to_base_offset": 0
+    },
+    {
+      "unit_id": "UNIT_C",
+      "symbol": "°C",
+      "name": "Celsius",
+      "measurement_type": "temperature",
+      "base_unit": "K",
+      "to_base_multiplier": 1,
+      "to_base_offset": 273.15
+    },
+    {
+      "unit_id": "UNIT_F",
+      "symbol": "°F",
+      "name": "Fahrenheit",
+      "measurement_type": "temperature",
+      "base_unit": "K",
+      "to_base_multiplier": 0.5555555555555556,
+      "to_base_offset": 255.3722222222222
+    },
+    {
+      "unit_id": "UNIT_MMOL_L",
+      "symbol": "mmol/L",
+      "name": "Millimole per Liter",
+      "measurement_type": "concentration",
+      "base_unit": "mmol/L",
+      "to_base_multiplier": 1
+    },
+    {
+      "unit_id": "UNIT_MG_DL",
+      "symbol": "mg/dL",
+      "name": "Milligram per Deciliter",
+      "measurement_type": "concentration",
+      "base_unit": "mmol/L",
+      "to_base_multiplier": 1
+    },
+    {
+      "unit_id": "UNIT_PA",
+      "symbol": "Pa",
+      "name": "Pascal",
+      "measurement_type": "pressure",
+      "base_unit": "Pa",
+      "to_base_multiplier": 1
+    },
+    {
+      "unit_id": "UNIT_KPA",
+      "symbol": "kPa",
+      "name": "Kilopascal",
+      "measurement_type": "pressure",
+      "base_unit": "Pa",
+      "to_base_multiplier": 1000
+    },
+    {
+      "unit_id": "UNIT_MMHG",
+      "symbol": "mmHg",
+      "name": "Millimeter of Mercury",
+      "measurement_type": "pressure",
+      "base_unit": "Pa",
+      "to_base_multiplier": 133.322387415
+    },
+    {
+      "unit_id": "UNIT_BAR",
+      "symbol": "bar",
+      "name": "Bar",
+      "measurement_type": "pressure",
+      "base_unit": "Pa",
+      "to_base_multiplier": 100000
+    },
+    {
+      "unit_id": "UNIT_PCT",
+      "symbol": "%",
+      "name": "Percent",
+      "measurement_type": "percentage",
+      "base_unit": "%",
+      "to_base_multiplier": 1
+    },
+    {
+      "unit_id": "UNIT_RATIO",
+      "symbol": "ratio",
+      "name": "Fraction / Ratio",
+      "measurement_type": "ratio",
+      "base_unit": "ratio",
+      "to_base_multiplier": 1
+    },
+    {
+      "unit_id": "UNIT_NONE",
+      "symbol": "unitless",
+      "name": "Dimensionless",
+      "measurement_type": "dimensionless",
+      "base_unit": "unitless",
+      "to_base_multiplier": 1
+    }
+  ],
+  "variables": [
+    {
+      "variable_id": "VAR_DEMO_WEIGHT",
+      "name": "Body Weight",
+      "label": "Body Weight (Demo)",
+      "definition": "[DEMO PLACEHOLDER: Total body mass measured under standardized conditions]",
+      "datatype": "number",
+      "unit": "kg",
+      "measurement_type": "mass",
+      "allowed_range": {
+        "min": 2,
+        "max": 500,
+        "warning_min": 30,
+        "warning_max": 250
+      },
+      "population": "Adult human (Demo test cohort)",
+      "source_reference": "REF_DEMO_001",
+      "version": "1.0.0",
+      "status": "EXPERIMENTAL",
+      "created_at": "2026-09-01T00:00:00Z",
+      "updated_at": "2026-09-01T00:00:00Z"
+    },
+    {
+      "variable_id": "VAR_DEMO_HEIGHT",
+      "name": "Body Height",
+      "label": "Stature / Height (Demo)",
+      "definition": "[DEMO PLACEHOLDER: Standing height measured with stadiometer]",
+      "datatype": "number",
+      "unit": "m",
+      "measurement_type": "length",
+      "allowed_range": {
+        "min": 0.4,
+        "max": 2.8,
+        "warning_min": 1,
+        "warning_max": 2.2
+      },
+      "population": "Adult human (Demo test cohort)",
+      "source_reference": "REF_DEMO_001",
+      "version": "1.0.0",
+      "status": "EXPERIMENTAL",
+      "created_at": "2026-09-01T00:00:00Z",
+      "updated_at": "2026-09-01T00:00:00Z"
+    },
+    {
+      "variable_id": "VAR_DEMO_AGE",
+      "name": "Chronological Age",
+      "label": "Age in Years (Demo)",
+      "definition": "[DEMO PLACEHOLDER: Elapsed time since birth in complete solar years]",
+      "datatype": "number",
+      "unit": "yr",
+      "measurement_type": "time",
+      "allowed_range": {
+        "min": 0,
+        "max": 130
+      },
+      "population": "General population",
+      "version": "1.0.0",
+      "status": "EXPERIMENTAL",
+      "created_at": "2026-09-01T00:00:00Z",
+      "updated_at": "2026-09-01T00:00:00Z"
+    },
+    {
+      "variable_id": "VAR_DEMO_RESTING_METABOLIC_RATE",
+      "name": "Resting Metabolic Rate",
+      "label": "Estimated Resting Energy Expenditure (Demo)",
+      "definition": "[DEMO PLACEHOLDER: Estimated baseline daily energy turnover]",
+      "datatype": "number",
+      "unit": "kcal",
+      "measurement_type": "energy",
+      "allowed_range": {
+        "min": 400,
+        "max": 5000
+      },
+      "version": "1.0.0",
+      "status": "EXPERIMENTAL",
+      "created_at": "2026-09-01T00:00:00Z",
+      "updated_at": "2026-09-01T00:00:00Z"
+    },
+    {
+      "variable_id": "VAR_DEMO_SBP",
+      "name": "Systolic Blood Pressure",
+      "label": "Tekanan Darah Sistolik (SBP)",
+      "definition": "Tekanan puncak pada arteri sistemik selama fase ejeksi sistolik ventrikel kiri.",
+      "datatype": "number",
+      "unit": "mmHg",
+      "measurement_type": "pressure",
+      "allowed_range": {
+        "min": 50,
+        "max": 260,
+        "warning_min": 90,
+        "warning_max": 180
+      },
+      "population": "Adult human",
+      "version": "1.0.0",
+      "status": "EXPERIMENTAL",
+      "created_at": "2026-09-01T00:00:00Z",
+      "updated_at": "2026-09-01T00:00:00Z"
+    },
+    {
+      "variable_id": "VAR_DEMO_DBP",
+      "name": "Diastolic Blood Pressure",
+      "label": "Tekanan Darah Diastolik (DBP)",
+      "definition": "Tekanan minimum pada arteri sistemik selama fase relaksasi diastolik ventrikel.",
+      "datatype": "number",
+      "unit": "mmHg",
+      "measurement_type": "pressure",
+      "allowed_range": {
+        "min": 30,
+        "max": 150,
+        "warning_min": 60,
+        "warning_max": 110
+      },
+      "population": "Adult human",
+      "version": "1.0.0",
+      "status": "EXPERIMENTAL",
+      "created_at": "2026-09-01T00:00:00Z",
+      "updated_at": "2026-09-01T00:00:00Z"
+    }
+  ],
+  "parameters": [
+    {
+      "parameter_id": "PARAM_DEMO_WEIGHT_EXPONENT",
+      "name": "Weight Scaling Exponent (Demo)",
+      "description": "[DEMO ONLY - NOT SCIENTIFICALLY VERIFIED] Scaling power for body mass in demo calculation.",
+      "value": 1,
+      "unit": "unitless",
+      "valid_range": {
+        "min": 0.5,
+        "max": 2
+      },
+      "reference_ids": [
+        "REF_DEMO_001"
+      ],
+      "version": "1.0.0",
+      "status": "EXPERIMENTAL",
+      "is_constant": false,
+      "created_at": "2026-09-01T00:00:00Z",
+      "updated_at": "2026-09-01T00:00:00Z"
+    },
+    {
+      "parameter_id": "PARAM_DEMO_HEIGHT_EXPONENT",
+      "name": "Height Power Exponent (Demo)",
+      "description": "[DEMO ONLY - NOT SCIENTIFICALLY VERIFIED] Geometric dimensional power for height.",
+      "value": 2,
+      "unit": "unitless",
+      "valid_range": {
+        "min": 1,
+        "max": 3.5
+      },
+      "reference_ids": [
+        "REF_DEMO_001"
+      ],
+      "version": "1.0.0",
+      "status": "EXPERIMENTAL",
+      "is_constant": false,
+      "created_at": "2026-09-01T00:00:00Z",
+      "updated_at": "2026-09-01T00:00:00Z"
+    },
+    {
+      "parameter_id": "PARAM_DEMO_BEE_BASE",
+      "name": "Baseline Metabolic Coefficient (Demo)",
+      "description": "[DEMO ONLY - NOT SCIENTIFICALLY VERIFIED] Additive constant for demo energy model.",
+      "value": 500,
+      "unit": "kcal",
+      "valid_range": {
+        "min": 0,
+        "max": 1000
+      },
+      "reference_ids": [
+        "REF_DEMO_002"
+      ],
+      "version": "1.0.0",
+      "status": "EXPERIMENTAL",
+      "is_constant": false,
+      "created_at": "2026-09-01T00:00:00Z",
+      "updated_at": "2026-09-01T00:00:00Z"
+    },
+    {
+      "parameter_id": "PARAM_BMR_SEX_OFFSET",
+      "name": "Mifflin-St Jeor Sex-Specific Energy Offset",
+      "description": "Sex-specific constant in the Mifflin-St Jeor basal metabolic rate equation (+5 kcal/day for males, -161 kcal/day for females).",
+      "value": 5,
+      "unit": "kcal",
+      "valid_range": {
+        "min": -250,
+        "max": 50
+      },
+      "reference_ids": [
+        "REF_DEMO_002"
+      ],
+      "version": "1.0.0",
+      "status": "VERIFIED",
+      "is_constant": false,
+      "created_at": "2026-09-01T00:00:00Z",
+      "updated_at": "2026-09-01T00:00:00Z"
+    }
+  ],
+  "formulas": [
+    {
+      "formula_id": "FORMULA_DEMO_QUETELET",
+      "name": "Demo Anthropometric Ratio Formula",
+      "description": "[DEMO ONLY - NOT SCIENTIFICALLY VERIFIED] Illustrative formula computing weight / (height ^ height_exponent).",
+      "version": "1.0.0",
+      "status": "EXPERIMENTAL",
+      "inputs": [
+        {
+          "variable_id": "VAR_DEMO_WEIGHT",
+          "name": "Weight",
+          "unit": "kg",
+          "required": true,
+          "default_value": 70
+        },
+        {
+          "variable_id": "VAR_DEMO_HEIGHT",
+          "name": "Height",
+          "unit": "m",
+          "required": true,
+          "default_value": 1.75
+        }
+      ],
+      "outputs": [
+        {
+          "name": "anthropometric_ratio",
+          "unit": "kg/m^2",
+          "datatype": "number",
+          "description": "Calculated ratio"
+        }
+      ],
+      "parameter_ids": [
+        "PARAM_DEMO_HEIGHT_EXPONENT"
+      ],
+      "expression_ast": {
+        "type": "OPERATOR",
+        "op": "DIVIDE",
+        "args": [
+          {
+            "type": "VARIABLE",
+            "variable_id": "VAR_DEMO_WEIGHT",
+            "expected_unit": "kg"
+          },
+          {
+            "type": "OPERATOR",
+            "op": "POWER",
+            "args": [
+              {
+                "type": "VARIABLE",
+                "variable_id": "VAR_DEMO_HEIGHT",
+                "expected_unit": "m"
+              },
+              {
+                "type": "PARAMETER",
+                "parameter_id": "PARAM_DEMO_HEIGHT_EXPONENT"
+              }
+            ]
+          }
+        ]
+      },
+      "expression_string": "Weight / (Height ^ PARAM_DEMO_HEIGHT_EXPONENT)",
+      "reference_ids": [
+        "REF_DEMO_001"
+      ],
+      "assumptions": [
+        "Standing posture stadiometry",
+        "Normohydrated state in demo test cohort"
+      ],
+      "limitations": [
+        "Does not differentiate lean vs adipose tissue",
+        "Demo placeholder only"
+      ],
+      "validation_status": "UNVERIFIED_DEMO",
+      "created_by": "SYSTEM_SEEDED",
+      "created_at": "2026-09-01T00:00:00Z",
+      "updated_at": "2026-09-01T00:00:00Z"
+    },
+    {
+      "formula_id": "FORMULA_DEMO_LINEAR_RMR",
+      "name": "Demo Energy Approximation Formula",
+      "description": "[DEMO ONLY - NOT SCIENTIFICALLY VERIFIED] Demonstrates multi-term additive expression with parameter offset: Base + (10 * Weight) + (6.25 * Height_cm) - (5 * Age).",
+      "version": "1.0.0",
+      "status": "EXPERIMENTAL",
+      "inputs": [
+        {
+          "variable_id": "VAR_DEMO_WEIGHT",
+          "name": "Weight",
+          "unit": "kg",
+          "required": true,
+          "default_value": 70
+        },
+        {
+          "variable_id": "VAR_DEMO_HEIGHT",
+          "name": "Height",
+          "unit": "m",
+          "required": true,
+          "default_value": 1.75
+        },
+        {
+          "variable_id": "VAR_DEMO_AGE",
+          "name": "Age",
+          "unit": "yr",
+          "required": true,
+          "default_value": 25
+        }
+      ],
+      "outputs": [
+        {
+          "name": "estimated_rmr",
+          "unit": "kcal",
+          "datatype": "number",
+          "description": "Resting energy expenditure"
+        }
+      ],
+      "parameter_ids": [
+        "PARAM_DEMO_BEE_BASE"
+      ],
+      "expression_ast": {
+        "type": "OPERATOR",
+        "op": "ADD",
+        "args": [
+          {
+            "type": "PARAMETER",
+            "parameter_id": "PARAM_DEMO_BEE_BASE"
+          },
+          {
+            "type": "OPERATOR",
+            "op": "MULTIPLY",
+            "args": [
+              {
+                "type": "CONSTANT",
+                "value": 10
+              },
+              {
+                "type": "VARIABLE",
+                "variable_id": "VAR_DEMO_WEIGHT"
+              }
+            ]
+          },
+          {
+            "type": "OPERATOR",
+            "op": "MULTIPLY",
+            "args": [
+              {
+                "type": "CONSTANT",
+                "value": 625
+              },
+              {
+                "type": "VARIABLE",
+                "variable_id": "VAR_DEMO_HEIGHT"
+              }
+            ]
+          },
+          {
+            "type": "OPERATOR",
+            "op": "MULTIPLY",
+            "args": [
+              {
+                "type": "CONSTANT",
+                "value": -5
+              },
+              {
+                "type": "VARIABLE",
+                "variable_id": "VAR_DEMO_AGE"
+              }
+            ]
+          }
+        ]
+      },
+      "expression_string": "PARAM_DEMO_BEE_BASE + (10 * Weight) + (625 * Height_m) - (5 * Age)",
+      "reference_ids": [
+        "REF_DEMO_002"
+      ],
+      "assumptions": [
+        "Thermal neutrality",
+        "Fasting state >= 12h for test subjects"
+      ],
+      "limitations": [
+        "Crude demographic model for platform testing only"
+      ],
+      "validation_status": "UNVERIFIED_DEMO",
+      "created_by": "SYSTEM_SEEDED",
+      "created_at": "2026-09-01T00:00:00Z",
+      "updated_at": "2026-09-01T00:00:00Z"
+    },
+    {
+      "formula_id": "FORMULA_BMI_QUETELET",
+      "name": "Indeks Massa Tubuh (BMI / Body Mass Index - Quetelet)",
+      "description": "Standar antropometri WHO untuk klasifikasi status gizi berdasarkan rasio Berat Badan (kg) terhadap kuadrat Tinggi Badan (m^2): Weight / (Height ^ 2).",
+      "version": "1.2.0",
+      "status": "VERIFIED",
+      "inputs": [
+        {
+          "variable_id": "VAR_DEMO_WEIGHT",
+          "name": "Berat Badan",
+          "unit": "kg",
+          "required": true,
+          "default_value": 70
+        },
+        {
+          "variable_id": "VAR_DEMO_HEIGHT",
+          "name": "Tinggi Badan",
+          "unit": "m",
+          "required": true,
+          "default_value": 1.75
+        }
+      ],
+      "outputs": [
+        {
+          "name": "bmi_index",
+          "unit": "kg/m^2",
+          "datatype": "number",
+          "description": "Indeks Massa Tubuh (kg/m^2)"
+        }
+      ],
+      "parameter_ids": [
+        "PARAM_DEMO_HEIGHT_EXPONENT"
+      ],
+      "expression_ast": {
+        "type": "OPERATOR",
+        "op": "DIVIDE",
+        "args": [
+          {
+            "type": "VARIABLE",
+            "variable_id": "VAR_DEMO_WEIGHT",
+            "expected_unit": "kg"
+          },
+          {
+            "type": "OPERATOR",
+            "op": "POWER",
+            "args": [
+              {
+                "type": "VARIABLE",
+                "variable_id": "VAR_DEMO_HEIGHT",
+                "expected_unit": "m"
+              },
+              {
+                "type": "PARAMETER",
+                "parameter_id": "PARAM_DEMO_HEIGHT_EXPONENT"
+              }
+            ]
+          }
+        ]
+      },
+      "expression_string": "Weight / (Height ^ PARAM_DEMO_HEIGHT_EXPONENT)",
+      "reference_ids": [
+        "REF_DEMO_001"
+      ],
+      "assumptions": [
+        "Postur berdiri tegak standar stadiometri",
+        "Status hidrasi normovolemik"
+      ],
+      "limitations": [
+        "Tidak membedakan proporsi massa otot (FFM) vs adiposa"
+      ],
+      "validation_status": "CLINICALLY_VERIFIED",
+      "created_by": "WHO_STANDARD",
+      "created_at": "2026-09-01T00:00:00Z",
+      "updated_at": "2026-09-01T00:00:00Z"
+    },
+    {
+      "module_id": "FORMULA_BMR_MIFFLIN",
+      "module_type": "FORMULA",
+      "formula_id": "FORMULA_BMR_MIFFLIN",
+      "name": "Laju Metabolisme Basal (BMR - Mifflin-St Jeor)",
+      "description": "Standar emas klinis estimasi pengeluaran energi basal (BMR/REE): (10 * Berat_kg) + (625 * Tinggi_m) - (5 * Usia) + Sex_Offset (+5 Pria / -161 Wanita).",
+      "version": "1.2.0",
+      "status": "VERIFIED",
+      "inputs": [
+        {
+          "variable_id": "VAR_DEMO_WEIGHT",
+          "name": "Berat Badan",
+          "unit": "kg",
+          "required": true,
+          "default_value": 70
+        },
+        {
+          "variable_id": "VAR_DEMO_HEIGHT",
+          "name": "Tinggi Badan",
+          "unit": "m",
+          "required": true,
+          "default_value": 1.75
+        },
+        {
+          "variable_id": "VAR_DEMO_AGE",
+          "name": "Usia Kronologis",
+          "unit": "yr",
+          "required": true,
+          "default_value": 28
+        }
+      ],
+      "outputs": [
+        {
+          "name": "bmr_kcal",
+          "unit": "kcal/day",
+          "datatype": "number",
+          "description": "Pengeluaran Energi Basal Harian"
+        }
+      ],
+      "parameter_ids": [
+        "PARAM_BMR_SEX_OFFSET"
+      ],
+      "expression_ast": {
+        "type": "OPERATOR",
+        "op": "ADD",
+        "args": [
+          {
+            "type": "OPERATOR",
+            "op": "MULTIPLY",
+            "args": [
+              {
+                "type": "CONSTANT",
+                "value": 10
+              },
+              {
+                "type": "VARIABLE",
+                "variable_id": "VAR_DEMO_WEIGHT"
+              }
+            ]
+          },
+          {
+            "type": "OPERATOR",
+            "op": "MULTIPLY",
+            "args": [
+              {
+                "type": "CONSTANT",
+                "value": 625
+              },
+              {
+                "type": "VARIABLE",
+                "variable_id": "VAR_DEMO_HEIGHT"
+              }
+            ]
+          },
+          {
+            "type": "OPERATOR",
+            "op": "MULTIPLY",
+            "args": [
+              {
+                "type": "CONSTANT",
+                "value": -5
+              },
+              {
+                "type": "VARIABLE",
+                "variable_id": "VAR_DEMO_AGE"
+              }
+            ]
+          },
+          {
+            "type": "PARAMETER",
+            "parameter_id": "PARAM_BMR_SEX_OFFSET"
+          }
+        ]
+      },
+      "expression_string": "(10 * Weight) + (625 * Height_m) - (5 * Age) + Sex_Offset",
+      "reference_ids": [
+        "REF_DEMO_002"
+      ],
+      "assumptions": [
+        "Suhu lingkungan termonetral",
+        "Puasa post-absorptif minimal 12 jam"
+      ],
+      "limitations": [
+        "Sensitivitas berkurang pada atlet dengan massa otot ekstrim"
+      ],
+      "validation_status": "CLINICALLY_VERIFIED",
+      "created_by": "MIFFLIN_1990",
+      "created_at": "2026-09-01T00:00:00Z",
+      "updated_at": "2026-09-01T00:00:00Z"
+    },
+    {
+      "formula_id": "FORMULA_MAP_HEMODYNAMICS",
+      "name": "Tekanan Arteri Rata-rata (MAP - Mean Arterial Pressure)",
+      "description": "Tekanan perfusi organ vaskular rata-rata dalam satu siklus jantung: DBP + (SBP - DBP) / 3.",
+      "version": "1.0.0",
+      "status": "VERIFIED",
+      "inputs": [
+        {
+          "variable_id": "VAR_DEMO_SBP",
+          "name": "Tekanan Sistolik (SBP)",
+          "unit": "mmHg",
+          "required": true,
+          "default_value": 120
+        },
+        {
+          "variable_id": "VAR_DEMO_DBP",
+          "name": "Tekanan Diastolik (DBP)",
+          "unit": "mmHg",
+          "required": true,
+          "default_value": 80
+        }
+      ],
+      "outputs": [
+        {
+          "name": "map_pressure",
+          "unit": "mmHg",
+          "datatype": "number",
+          "description": "Tekanan Arteri Rata-Rata (mmHg)"
+        }
+      ],
+      "parameter_ids": [],
+      "expression_ast": {
+        "type": "OPERATOR",
+        "op": "ADD",
+        "args": [
+          {
+            "type": "VARIABLE",
+            "variable_id": "VAR_DEMO_DBP"
+          },
+          {
+            "type": "OPERATOR",
+            "op": "DIVIDE",
+            "args": [
+              {
+                "type": "OPERATOR",
+                "op": "SUBTRACT",
+                "args": [
+                  {
+                    "type": "VARIABLE",
+                    "variable_id": "VAR_DEMO_SBP"
+                  },
+                  {
+                    "type": "VARIABLE",
+                    "variable_id": "VAR_DEMO_DBP"
+                  }
+                ]
+              },
+              {
+                "type": "CONSTANT",
+                "value": 3
+              }
+            ]
+          }
+        ]
+      },
+      "expression_string": "DBP + ((SBP - DBP) / 3)",
+      "reference_ids": [
+        "REF_DEMO_001"
+      ],
+      "assumptions": [
+        "Irama sinus jantung teratur",
+        "Pemeriksaan tensimeter tervalidasi"
+      ],
+      "limitations": [
+        "Perkiraan berkurang akurasinya pada takikardia berat (>120 bpm)"
+      ],
+      "validation_status": "CLINICALLY_VERIFIED",
+      "created_by": "GUYTON_HALL",
+      "created_at": "2026-09-01T00:00:00Z",
+      "updated_at": "2026-09-01T00:00:00Z"
+    }
+  ],
+  "algorithms": [],
+  "models": [
+    {
+      "model_id": "MODEL_DEMO_ANTHROPOMETRY_V1",
+      "name": "Demo Anthropometric & Bioenergetic Baseline Model",
+      "description": "[DEMO ONLY - NOT SCIENTIFICALLY VERIFIED] Composite baseline model integrating demo ratio and metabolic calculation modules.",
+      "version": "1.0.0",
+      "status": "EXPERIMENTAL",
+      "is_verified": false,
+      "variable_ids": [
+        "VAR_DEMO_WEIGHT",
+        "VAR_DEMO_HEIGHT",
+        "VAR_DEMO_AGE",
+        "VAR_DEMO_RESTING_METABOLIC_RATE"
+      ],
+      "formula_ids": [
+        "FORMULA_DEMO_QUETELET",
+        "FORMULA_DEMO_LINEAR_RMR"
+      ],
+      "algorithm_ids": [],
+      "parameter_ids": [
+        "PARAM_DEMO_HEIGHT_EXPONENT",
+        "PARAM_DEMO_BEE_BASE"
+      ],
+      "reference_ids": [
+        "REF_DEMO_001",
+        "REF_DEMO_002"
+      ],
+      "assumptions": [
+        "Adult subjects aged 18-65",
+        "Normal environmental conditions",
+        "Infrastructure demo testing only"
+      ],
+      "validation_criteria": "Benchmarked against numerical integration unit tests",
+      "created_by": "SYSTEM_SEEDED",
+      "created_at": "2026-09-01T00:00:00Z",
+      "updated_at": "2026-09-01T00:00:00Z"
+    }
+  ],
+  "references": [
+    {
+      "reference_id": "REF_DEMO_001",
+      "title": "Demo Reference: Principles of Anthropometric Indexing in Computational Models",
+      "authors": [
+        "Doe, J.",
+        "Smith, A."
+      ],
+      "year": 2024,
+      "journal_or_publisher": "Journal of Computational Physiology Demonstration",
+      "doi": "10.1000/demo.nutribodysim.001",
+      "citation_key": "Doe2024Demo",
+      "abstract": "This is a demo placeholder reference used solely to verify the NutriBodySim reference link pipeline."
+    },
+    {
+      "reference_id": "REF_DEMO_002",
+      "title": "Demo Reference: Energy Expenditure Coefficients and Calibration Benchmarks",
+      "authors": [
+        "Taylor, R.",
+        "Lin, K."
+      ],
+      "year": 2023,
+      "journal_or_publisher": "Nutritional Bioenergetics Archive (Mock)",
+      "doi": "10.1000/demo.nutribodysim.002",
+      "citation_key": "Taylor2023Demo",
+      "abstract": "Placeholder citation for testing parameter provenance and model attribution."
+    }
+  ],
+  "interpretation_rules": [
+    {
+      "module_id": "RULE_BMI_WHO_ADULT",
+      "module_type": "INTERPRETATION",
+      "rule_id": "RULE_BMI_WHO_ADULT",
+      "name": "Klasifikasi Status Gizi Indeks Massa Tubuh Dewasa (WHO 2000)",
+      "description": "Pedoman klasifikasi berat badan berdasarkan indeks massa tubuh untuk populasi dewasa usia ≥18 tahun (WHO Technical Report Series 854).",
+      "version": "1.0.0",
+      "status": "VERIFIED",
+      "target_variable_or_metric": "VAR_DEMO_BMI",
+      "unit": "kg/m²",
+      "population": "Adults (age >= 18)",
+      "reference_ids": [
+        "REF_DEMO_001"
+      ],
+      "thresholds": [
+        {
+          "label": "Underweight",
+          "max": 18.49,
+          "max_inclusive": true,
+          "clinical_status": "Gizi Kurang (Underweight)",
+          "badge_color": "amber",
+          "description": "Indeks massa tubuh di bawah ambang batas fisiologis normal; risiko defisiensi makronutrien dan penurunan imunitas."
+        },
+        {
+          "label": "Normal weight",
+          "min": 18.5,
+          "max": 24.99,
+          "min_inclusive": true,
+          "max_inclusive": true,
+          "clinical_status": "Gizi Normal / Optimal",
+          "badge_color": "emerald",
+          "description": "Rentang berat badan optimal dengan risiko mortalitas dan morbiditas kardiometabolik terendah."
+        },
+        {
+          "label": "Overweight",
+          "min": 25,
+          "max": 29.99,
+          "min_inclusive": true,
+          "max_inclusive": true,
+          "clinical_status": "Kelebihan Berat Badan (Overweight)",
+          "badge_color": "amber",
+          "description": "Peningkatan akumulasi adiposa pra-obesitas; indikasi peningkatan resistensi insulin dan beban biomekanik."
+        },
+        {
+          "label": "Obesity Class I",
+          "min": 30,
+          "max": 34.99,
+          "min_inclusive": true,
+          "max_inclusive": true,
+          "clinical_status": "Obesitas Tingkat I",
+          "badge_color": "rose",
+          "description": "Akumulasi jaringan adiposa patologis sedang; peningkatan risiko aterosklerosis dan sindrom metabolik."
+        },
+        {
+          "label": "Obesity Class II/III",
+          "min": 35,
+          "min_inclusive": true,
+          "clinical_status": "Obesitas Tingkat II/III (Berat)",
+          "badge_color": "red",
+          "description": "Obesitas klinis tingkat lanjut; risiko tinggi komorbiditas kardiometabolik, kardiovaskular, dan apnea tidur obstruktif."
+        }
+      ],
+      "created_by": "WHO_TRS_854",
+      "created_at": "2026-09-01T00:00:00Z",
+      "updated_at": "2026-09-01T00:00:00Z"
+    },
+    {
+      "module_id": "RULE_MAP_CLINICAL_PERFUSION",
+      "module_type": "INTERPRETATION",
+      "rule_id": "RULE_MAP_CLINICAL_PERFUSION",
+      "name": "Kriteria Perfusi Hemodinamik Tekanan Arteri Rata-rata (MAP)",
+      "description": "Evaluasi kecukupan tekanan perfusi koroner dan mikrosirkulasi organ vital sistemik (Guyton and Hall Textbook of Medical Physiology).",
+      "version": "1.0.0",
+      "status": "VERIFIED",
+      "target_variable_or_metric": "VAR_DEMO_MAP",
+      "unit": "mmHg",
+      "population": "Adults",
+      "reference_ids": [
+        "REF_DEMO_001"
+      ],
+      "thresholds": [
+        {
+          "label": "Low Perfusion",
+          "max": 64.99,
+          "max_inclusive": true,
+          "clinical_status": "Hipotensi / Risiko Hipoperfusi Jaringan",
+          "badge_color": "red",
+          "description": "Tekanan perfusi organ kritis (terutama ginjal dan serebral) berisiko terganggu jika MAP bertahan di bawah 65 mmHg."
+        },
+        {
+          "label": "Adequate Perfusion",
+          "min": 65,
+          "max": 100,
+          "min_inclusive": true,
+          "max_inclusive": true,
+          "clinical_status": "Perfusi Organ Vital Adekuat (Normal)",
+          "badge_color": "emerald",
+          "description": "Gradien perfusi arteri sistemik berada dalam rentang hemodinamika fisiologis optimal."
+        },
+        {
+          "label": "Elevated Perfusion Load",
+          "min": 100.01,
+          "min_inclusive": true,
+          "clinical_status": "Beban Vaskular Meningkat / Hipertensi",
+          "badge_color": "amber",
+          "description": "Beban afterload ventrikel kiri dan resistensi perifer sistemik meningkat; indikasi hipertensi vaskular."
+        }
+      ],
+      "created_by": "GUYTON_HALL_HEMODYNAMICS",
+      "created_at": "2026-09-01T00:00:00Z",
+      "updated_at": "2026-09-01T00:00:00Z"
+    }
+  ],
+  "calculations": [],
+  "datasets": [
+    {
+      "id": "ds_cohort_alpha",
+      "project_id": "proj_metabolic_v1",
+      "name": "Metabolic & Anthropometric Cohort Alpha (N=10)",
+      "description": "Standardized baseline clinical measurements including measured indirect calorimetry RMR and stature.",
+      "source_file": "cohort_alpha_baseline.csv",
+      "uploaded_by": "usr_researcher",
+      "current_version": "v1.1",
+      "created_at": "2026-09-21T10:00:00.000Z",
+      "updated_at": "2026-09-21T10:00:00.000Z"
+    }
+  ],
+  "dataset_versions": [
+    {
+      "id": "dsv_1_0_raw",
+      "dataset_id": "ds_cohort_alpha",
+      "version_tag": "v1.0",
+      "state": "RAW",
+      "columns": [
+        {
+          "name": "subject_id",
+          "detected_type": "string",
+          "missing_count": 0,
+          "unique_count": 10
+        },
+        {
+          "name": "sex",
+          "detected_type": "string",
+          "missing_count": 0,
+          "unique_count": 2
+        },
+        {
+          "name": "age",
+          "detected_type": "number",
+          "unit": "yr",
+          "missing_count": 0,
+          "unique_count": 10
+        },
+        {
+          "name": "weight_kg",
+          "detected_type": "number",
+          "unit": "kg",
+          "variable_id": "VAR_DEMO_WEIGHT",
+          "missing_count": 0,
+          "unique_count": 10
+        },
+        {
+          "name": "height_cm",
+          "detected_type": "number",
+          "unit": "cm",
+          "variable_id": "VAR_DEMO_HEIGHT",
+          "missing_count": 0,
+          "unique_count": 10
+        },
+        {
+          "name": "resting_hr",
+          "detected_type": "number",
+          "unit": "bpm",
+          "missing_count": 0,
+          "unique_count": 9
+        },
+        {
+          "name": "rmr_measured",
+          "detected_type": "number",
+          "unit": "kcal",
+          "variable_id": "VAR_DEMO_RESTING_METABOLIC_RATE",
+          "missing_count": 0,
+          "unique_count": 10
+        }
+      ],
+      "data": [
+        {
+          "subject_id": "SUBJ_101",
+          "sex": "M",
+          "age": 28,
+          "weight_kg": 78.4,
+          "height_cm": 182,
+          "resting_hr": 64,
+          "rmr_measured": 1780
+        },
+        {
+          "subject_id": "SUBJ_102",
+          "sex": "F",
+          "age": 34,
+          "weight_kg": 62.1,
+          "height_cm": 165,
+          "resting_hr": 72,
+          "rmr_measured": 1390
+        },
+        {
+          "subject_id": "SUBJ_103",
+          "sex": "M",
+          "age": 45,
+          "weight_kg": 89,
+          "height_cm": 176.5,
+          "resting_hr": 78,
+          "rmr_measured": 1820
+        },
+        {
+          "subject_id": "SUBJ_104",
+          "sex": "F",
+          "age": 22,
+          "weight_kg": 54.5,
+          "height_cm": 160,
+          "resting_hr": 68,
+          "rmr_measured": 1295
+        },
+        {
+          "subject_id": "SUBJ_105",
+          "sex": "M",
+          "age": 51,
+          "weight_kg": 104.2,
+          "height_cm": 178,
+          "resting_hr": 82,
+          "rmr_measured": 1980
+        },
+        {
+          "subject_id": "SUBJ_106",
+          "sex": "F",
+          "age": 29,
+          "weight_kg": 58,
+          "height_cm": 168,
+          "resting_hr": 65,
+          "rmr_measured": 1410
+        },
+        {
+          "subject_id": "SUBJ_107",
+          "sex": "M",
+          "age": 39,
+          "weight_kg": 72.3,
+          "height_cm": 174,
+          "resting_hr": 70,
+          "rmr_measured": 1660
+        },
+        {
+          "subject_id": "SUBJ_108",
+          "sex": "F",
+          "age": 42,
+          "weight_kg": 69.8,
+          "height_cm": 162,
+          "resting_hr": 74,
+          "rmr_measured": 1450
+        },
+        {
+          "subject_id": "SUBJ_109",
+          "sex": "M",
+          "age": 24,
+          "weight_kg": 81,
+          "height_cm": 185,
+          "resting_hr": 60,
+          "rmr_measured": 1850
+        },
+        {
+          "subject_id": "SUBJ_110",
+          "sex": "F",
+          "age": 31,
+          "weight_kg": 65.5,
+          "height_cm": 170,
+          "resting_hr": 67,
+          "rmr_measured": 1480
+        }
+      ],
+      "validation_report": {
+        "is_valid": true,
+        "row_count": 10,
+        "column_count": 7,
+        "missing_values_count": 0,
+        "duplicate_rows_count": 0,
+        "outliers_detected": [],
+        "type_mismatches": [],
+        "warnings": [
+          "Raw immutable dataset ingestion confirmed."
+        ]
+      },
+      "transformation_applied": "Initial CSV Ingestion",
+      "created_by": "usr_researcher",
+      "created_at": "2026-09-21T10:00:00.000Z"
+    },
+    {
+      "id": "dsv_1_1_cleaned",
+      "dataset_id": "ds_cohort_alpha",
+      "version_tag": "v1.1",
+      "parent_version_tag": "v1.0",
+      "state": "VALIDATED",
+      "columns": [
+        {
+          "name": "subject_id",
+          "detected_type": "string",
+          "missing_count": 0,
+          "unique_count": 10
+        },
+        {
+          "name": "sex",
+          "detected_type": "string",
+          "missing_count": 0,
+          "unique_count": 2
+        },
+        {
+          "name": "age",
+          "detected_type": "number",
+          "unit": "yr",
+          "missing_count": 0,
+          "unique_count": 10
+        },
+        {
+          "name": "weight_kg",
+          "detected_type": "number",
+          "unit": "kg",
+          "variable_id": "VAR_DEMO_WEIGHT",
+          "missing_count": 0,
+          "unique_count": 10
+        },
+        {
+          "name": "height_cm",
+          "detected_type": "number",
+          "unit": "cm",
+          "variable_id": "VAR_DEMO_HEIGHT",
+          "missing_count": 0,
+          "unique_count": 10
+        },
+        {
+          "name": "height_m",
+          "detected_type": "number",
+          "unit": "m",
+          "variable_id": "VAR_DEMO_HEIGHT",
+          "missing_count": 0,
+          "unique_count": 10
+        },
+        {
+          "name": "resting_hr",
+          "detected_type": "number",
+          "unit": "bpm",
+          "missing_count": 0,
+          "unique_count": 9
+        },
+        {
+          "name": "rmr_measured",
+          "detected_type": "number",
+          "unit": "kcal",
+          "variable_id": "VAR_DEMO_RESTING_METABOLIC_RATE",
+          "missing_count": 0,
+          "unique_count": 10
+        }
+      ],
+      "data": [
+        {
+          "subject_id": "SUBJ_101",
+          "sex": "M",
+          "age": 28,
+          "weight_kg": 78.4,
+          "height_cm": 182,
+          "resting_hr": 64,
+          "rmr_measured": 1780,
+          "height_m": 1.82
+        },
+        {
+          "subject_id": "SUBJ_102",
+          "sex": "F",
+          "age": 34,
+          "weight_kg": 62.1,
+          "height_cm": 165,
+          "resting_hr": 72,
+          "rmr_measured": 1390,
+          "height_m": 1.65
+        },
+        {
+          "subject_id": "SUBJ_103",
+          "sex": "M",
+          "age": 45,
+          "weight_kg": 89,
+          "height_cm": 176.5,
+          "resting_hr": 78,
+          "rmr_measured": 1820,
+          "height_m": 1.765
+        },
+        {
+          "subject_id": "SUBJ_104",
+          "sex": "F",
+          "age": 22,
+          "weight_kg": 54.5,
+          "height_cm": 160,
+          "resting_hr": 68,
+          "rmr_measured": 1295,
+          "height_m": 1.6
+        },
+        {
+          "subject_id": "SUBJ_105",
+          "sex": "M",
+          "age": 51,
+          "weight_kg": 104.2,
+          "height_cm": 178,
+          "resting_hr": 82,
+          "rmr_measured": 1980,
+          "height_m": 1.78
+        },
+        {
+          "subject_id": "SUBJ_106",
+          "sex": "F",
+          "age": 29,
+          "weight_kg": 58,
+          "height_cm": 168,
+          "resting_hr": 65,
+          "rmr_measured": 1410,
+          "height_m": 1.68
+        },
+        {
+          "subject_id": "SUBJ_107",
+          "sex": "M",
+          "age": 39,
+          "weight_kg": 72.3,
+          "height_cm": 174,
+          "resting_hr": 70,
+          "rmr_measured": 1660,
+          "height_m": 1.74
+        },
+        {
+          "subject_id": "SUBJ_108",
+          "sex": "F",
+          "age": 42,
+          "weight_kg": 69.8,
+          "height_cm": 162,
+          "resting_hr": 74,
+          "rmr_measured": 1450,
+          "height_m": 1.62
+        },
+        {
+          "subject_id": "SUBJ_109",
+          "sex": "M",
+          "age": 24,
+          "weight_kg": 81,
+          "height_cm": 185,
+          "resting_hr": 60,
+          "rmr_measured": 1850,
+          "height_m": 1.85
+        },
+        {
+          "subject_id": "SUBJ_110",
+          "sex": "F",
+          "age": 31,
+          "weight_kg": 65.5,
+          "height_cm": 170,
+          "resting_hr": 67,
+          "rmr_measured": 1480,
+          "height_m": 1.7
+        }
+      ],
+      "validation_report": {
+        "is_valid": true,
+        "row_count": 10,
+        "column_count": 8,
+        "missing_values_count": 0,
+        "duplicate_rows_count": 0,
+        "outliers_detected": [],
+        "type_mismatches": [],
+        "warnings": [
+          "Computed standardized height_m column with unit normalization trace."
+        ]
+      },
+      "transformation_applied": "Normalized height_cm to SI standard height_m (height_cm * 0.01)",
+      "created_by": "usr_researcher",
+      "created_at": "2026-09-21T10:00:00.000Z"
+    }
+  ],
+  "statistics_analyses": [
+    {
+      "id": "stat_001",
+      "project_id": "proj_metabolic_v1",
+      "dataset_version_id": "dsv_1_1_cleaned",
+      "title": "Descriptive Profile: Weight & Measured RMR",
+      "analysis_type": "DESCRIPTIVE",
+      "target_columns": [
+        "weight_kg",
+        "rmr_measured",
+        "height_cm",
+        "age"
+      ],
+      "method_justification": "Parametric and non-parametric exploratory summary of human cohort baseline distributions.",
+      "results": {
+        "weight_kg": {
+          "mean": 71.31,
+          "median": 70.85,
+          "sd": 14.51,
+          "min": 54.5,
+          "max": 104.2,
+          "iqr": 19.8
+        },
+        "rmr_measured": {
+          "mean": 1623.5,
+          "median": 1570,
+          "sd": 236.4,
+          "min": 1295,
+          "max": 1980,
+          "iqr": 410
+        }
+      },
+      "provenance_hash": "9f2913e2bb9210c4d80a13ef299a9b1c",
+      "created_by": "usr_researcher",
+      "created_at": "2026-09-21T10:00:00.000Z"
+    }
+  ],
+  "charts": [
+    {
+      "id": "chart_001",
+      "project_id": "proj_metabolic_v1",
+      "dataset_version_id": "dsv_1_1_cleaned",
+      "analysis_id": "stat_001",
+      "title": "Weight vs Measured RMR Correlation Scatter",
+      "chart_type": "SCATTER",
+      "x_field": "weight_kg",
+      "y_field": "rmr_measured",
+      "group_by": "sex",
+      "config": {
+        "x_label": "Weight (kg)",
+        "y_label": "RMR Measured (kcal/day)"
+      },
+      "created_by": "usr_researcher",
+      "created_at": "2026-09-21T10:00:00.000Z"
+    }
+  ],
+  "notebooks": [
+    {
+      "id": "nb_metabolic_01",
+      "project_id": "proj_metabolic_v1",
+      "title": "Allometric Scaling & Metabolic Sensitivity Analysis",
+      "description": "Interactive computational notebook linking literature references, dataset versions, formula AST runs, and chart visualizers.",
+      "created_by": "usr_researcher",
+      "created_at": "2026-09-21T10:00:00.000Z",
+      "updated_at": "2026-09-21T10:00:00.000Z"
+    }
+  ],
+  "notebook_cells": [
+    {
+      "id": "cell_1",
+      "notebook_id": "nb_metabolic_01",
+      "cell_type": "TEXT",
+      "order": 1,
+      "title": "Project Hypothesis & Literature Context",
+      "content": "### 1. Research Objectives\nThis notebook evaluates the mathematical sensitivity of the **Demo Anthropometric Ratio Formula** under varying power exponents.\nWe evaluate whether calibrating `PARAM_DEMO_HEIGHT_EXPONENT` from 2.0 to 1.8 improves correlation with measured bioenergetic expenditure."
+    },
+    {
+      "id": "cell_2",
+      "notebook_id": "nb_metabolic_01",
+      "cell_type": "REFERENCE",
+      "order": 2,
+      "title": "Source Monograph Citation",
+      "content": "REF_DEMO_001",
+      "metadata": {
+        "reference_id": "REF_DEMO_001",
+        "selected_text": "true empirical scaling exponent fluctuates between 1.8 and 2.4"
+      }
+    },
+    {
+      "id": "cell_3",
+      "notebook_id": "nb_metabolic_01",
+      "cell_type": "DATA",
+      "order": 3,
+      "title": "Cohort Alpha Baseline Dataset (v1.1 Cleaned)",
+      "content": "dsv_1_1_cleaned",
+      "metadata": {
+        "dataset_version_id": "dsv_1_1_cleaned"
+      }
+    },
+    {
+      "id": "cell_4",
+      "notebook_id": "nb_metabolic_01",
+      "cell_type": "FORMULA",
+      "order": 4,
+      "title": "Execute Demo Anthropometric Formula",
+      "content": "FORMULA_DEMO_QUETELET",
+      "metadata": {
+        "formula_id": "FORMULA_DEMO_QUETELET"
+      }
+    },
+    {
+      "id": "cell_5",
+      "notebook_id": "nb_metabolic_01",
+      "cell_type": "CHART",
+      "order": 5,
+      "title": "Scatter Plot: Weight vs Measured RMR",
+      "content": "chart_001",
+      "metadata": {
+        "chart_id": "chart_001"
+      }
+    }
+  ],
+  "code_executions": [],
+  "experiments": [
+    {
+      "id": "exp_001",
+      "project_id": "proj_metabolic_v1",
+      "title": "Sensitivity of Stature Exponent on Demographic Cohort",
+      "description": "Comparison of baseline anthropometric model (exponent = 2.0) against experimental clone (exponent = 1.85).",
+      "baseline_model_id": "MODEL_DEMO_ANTHROPOMETRY_V1",
+      "experimental_model_id": "MODEL_DEMO_ANTHROPOMETRY_V1_CLONE",
+      "parameter_modifications": [
+        {
+          "parameter_id": "PARAM_DEMO_HEIGHT_EXPONENT",
+          "baseline_value": 2,
+          "experimental_value": 1.85,
+          "unit": "unitless",
+          "rationale": "Testing allometric scaling hypothesis based on literature note."
+        }
+      ],
+      "baseline_output": {
+        "anthropometric_ratio": 22.86,
+        "estimated_rmr": 1693.75
+      },
+      "experimental_output": {
+        "anthropometric_ratio": 24.81,
+        "estimated_rmr": 1693.75
+      },
+      "delta_summary": "Anthropometric ratio increased by +8.53% with exponent 1.85. Baseline RMR formulation remained stable.",
+      "status": "COMPLETED",
+      "provenance_hash": "2c8194a0e98031e4f9b8c08194ad9028",
+      "created_by": "usr_researcher",
+      "created_at": "2026-09-21T10:00:00.000Z",
+      "updated_at": "2026-09-21T10:00:00.000Z"
+    }
+  ],
+  "audit_logs": [
+    {
+      "id": "audit_0",
+      "user_id": "usr_admin",
+      "user_name": "System Administrator",
+      "action": "VERIFY",
+      "entity_type": "SYSTEM",
+      "entity_id": "ROOT",
+      "details": "NutriBodySim Computational Laboratory V1 initialized with academic registries and demo modules.",
+      "timestamp": "2026-09-21T10:00:00.000Z"
+    }
+  ],
+  "provenance_records": [
+    {
+      "id": "prov_init_001",
+      "project_id": "proj_metabolic_v1",
+      "target_entity_type": "EXPERIMENT",
+      "target_entity_id": "exp_001",
+      "user_id": "usr_researcher",
+      "dataset_version_id": "dsv_1_1_cleaned",
+      "model_version": "1.0.0",
+      "parameter_version": "1.0.0",
+      "environment_specs": "Node v22 / TSX / NutriBodySim Engine v1.0",
+      "provenance_hash": "2c8194a0e98031e4f9b8c08194ad9028",
+      "reproducibility_manifest": {
+        "dataset_version": "dsv_1_1_cleaned",
+        "model_id": "MODEL_DEMO_ANTHROPOMETRY_V1",
+        "parameter_deltas": [
+          {
+            "param": "PARAM_DEMO_HEIGHT_EXPONENT",
+            "from": 2,
+            "to": 1.85
+          }
+        ],
+        "execution_seed": 42
+      },
+      "created_at": "2026-09-21T10:00:00.000Z"
+    }
+  ],
+  "role_requests": [],
+  "external_identities": []
+}

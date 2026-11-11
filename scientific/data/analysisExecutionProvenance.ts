@@ -9,7 +9,7 @@
  * 3. Zero dynamic code evaluation (no eval, no new Function).
  */
 
-import * as crypto from 'crypto';
+import { sha256Hex } from '../crypto';
 import { canonicalizeJson } from '../provenance/provenancePersistence';
 
 export interface AnalysisExecutionProvenancePayload {
@@ -64,5 +64,5 @@ export function computeExecutionRequestProvenanceHash(
   };
 
   const canonicalString = canonicalizeJson(normalized);
-  return crypto.createHash('sha256').update(canonicalString, 'utf8').digest('hex');
+  return sha256Hex(canonicalString);
 }

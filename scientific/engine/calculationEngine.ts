@@ -17,7 +17,7 @@ import {
 } from '../types';
 import { convertUnit, findUnit } from '../units/unitConverter';
 import { InputValidator } from '../validator/inputValidator';
-import crypto from 'crypto';
+import { sha256Hex } from '../crypto';
 
 export interface CalculationInputPayload {
   formula: ScientificFormula;
@@ -151,7 +151,7 @@ export class CalculationEngine {
       result: finalResult,
       timestamp: new Date().toISOString()
     });
-    const provenance_hash = crypto.createHash('sha256').update(provenancePayload).digest('hex');
+    const provenance_hash = sha256Hex(provenancePayload);
 
     addStep(
       'PROVENANCE_SEALED',

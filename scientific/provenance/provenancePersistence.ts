@@ -6,7 +6,7 @@
  * and tamper-detection verification.
  */
 
-import * as crypto from 'crypto';
+import { sha256Hex } from '../crypto';
 import {
   ExecutionResult,
   ProvenanceAuditEvent,
@@ -115,7 +115,7 @@ export function extractIntegrityPayload(record: Partial<ProvenanceRecord>): Reco
  */
 export function computeProvenanceHash(payload: unknown): string {
   const canonical = canonicalizeJson(payload);
-  return crypto.createHash('sha256').update(canonical, 'utf8').digest('hex');
+  return sha256Hex(canonical);
 }
 
 export interface BuildProvenanceOptions {

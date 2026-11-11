@@ -15,7 +15,7 @@
  * - Statistical/cleaning algorithms
  */
 
-import * as crypto from 'crypto';
+import { sha256Hex } from '../crypto';
 import {
   DatasetDataReference,
   DatasetVersion,
@@ -61,7 +61,7 @@ export function computeDatasetVersionChecksum(
   };
 
   const canonical = canonicalizeJson(payload);
-  return crypto.createHash('sha256').update(canonical, 'utf8').digest('hex');
+  return sha256Hex(canonical);
 }
 
 /**

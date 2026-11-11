@@ -36,6 +36,11 @@ process.env.NUTRIBODYSIM_DB_PATH = isolatedDbPath;
 // resolveDatabasePath() evaluates process.env.NUTRIBODYSIM_DB_PATH which points to isolatedDbPath!
 // The active working database (data/nutribodysim_db.json) is NEVER read or written during initialization!
 const { db } = await import('../../database/store');
+const { initializeRuntimeDatabase, registerTestJsonStore } = await import('../../database/runtime');
+registerTestJsonStore(db);
+process.env.DATABASE_PROVIDER = 'json';
+process.env.ENABLE_DEMO_AUTH = 'true';
+await initializeRuntimeDatabase();
 
 beforeAll(() => {
   // Ensure the singleton's path remains explicitly pointed to the isolated test database

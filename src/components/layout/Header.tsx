@@ -76,23 +76,27 @@ export const Header: React.FC<HeaderProps> = ({
       <div className="flex items-center space-x-2 sm:space-x-3">
         {/* User Role Switcher in Indonesian */}
         <div className="flex items-center space-x-1.5 sm:space-x-2 bg-slate-50 border border-slate-200 rounded-lg px-2 sm:px-2.5 py-1">
-          <div className="flex items-center space-x-1 text-xs text-slate-600">
-            <UserCheck className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-            <span className="font-medium hidden md:inline text-[11px]">Pengguna:</span>
-          </div>
-          <select
-            id="user-role-selector"
-            aria-label="Ganti peran pengguna aktif"
-            value={currentUser.id}
-            onChange={(e) => onSwitchUser(e.target.value)}
-            className="bg-transparent text-xs font-semibold text-slate-800 focus:outline-none cursor-pointer border-none max-w-[120px] sm:max-w-[160px] truncate"
-          >
-            {allUsers.map((u) => (
-              <option key={u.id} value={u.id}>
-                {u.name} ({ROLE_LABELS_ID[u.role] || u.role})
-              </option>
-            ))}
-          </select>
+          {allUsers.length > 0 && (
+            <>
+              <div className="flex items-center space-x-1 text-xs text-slate-600">
+                <UserCheck className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                <span className="font-medium hidden md:inline text-[11px]">Pengguna:</span>
+              </div>
+              <select
+                id="user-role-selector"
+                aria-label="Ganti peran pengguna aktif"
+                value={currentUser.id}
+                onChange={(e) => onSwitchUser(e.target.value)}
+                className="bg-transparent text-xs font-semibold text-slate-800 focus:outline-none cursor-pointer border-none max-w-[120px] sm:max-w-[160px] truncate"
+              >
+                {allUsers.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.name} ({ROLE_LABELS_ID[u.role] || u.role})
+                  </option>
+                ))}
+              </select>
+            </>
+          )}
           <span
             className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-bold shrink-0 ${
               currentUser.role === 'Admin'

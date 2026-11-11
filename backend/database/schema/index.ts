@@ -2,8 +2,8 @@
  * NutriBodySim — Complete PostgreSQL Drizzle ORM Schema
  * Milestone: MVS-B2.5E.1B.4
  *
- * Barrel export for all 45 tables (32 domain tables + 13 junction tables)
- * and TypeScript type inference definitions.
+ * Barrel export for the 45 migration-baseline tables and operational runtime
+ * authentication tables, plus TypeScript type inference definitions.
  */
 
 // 1. Scientific Registry & Assembly (19 tables)
@@ -23,6 +23,7 @@ export * from './research';
 
 // 6. Provenance, Audit Trail & Scientific Calculations (3 tables)
 export * from './audit';
+export * from './runtimeAuth';
 
 // Inferred TypeScript Model Types
 import type { InferSelectModel, InferInsertModel } from 'drizzle-orm';

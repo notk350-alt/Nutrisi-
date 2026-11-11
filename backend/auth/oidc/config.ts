@@ -47,6 +47,14 @@ function isPlaceholder(value: string): boolean {
   return KNOWN_PLACEHOLDERS.some((p) => normalized.includes(p));
 }
 
+function parseIntegerSetting(value: string | undefined, defaultValue: number): number {
+  if (value === undefined || value.trim() === '') return defaultValue;
+  const normalized = value.trim();
+  if (!/^-?\d+$/.test(normalized)) return Number.NaN;
+  const parsed = Number(normalized);
+  return Number.isSafeInteger(parsed) ? parsed : Number.NaN;
+}
+
 /**
  * Validates an OIDC configuration object against strict security rules.
  */
@@ -92,10 +100,14 @@ export function validateOIDCConfig(
   } else {
     try {
       const redirectUrl = new URL(config.redirectUri);
-      if (isProduction && redirectUrl.protocol !== 'https:') {
-        errors.push(`redirectUri must use HTTPS in production (received '${redirectUrl.protocol}')`);
-      } else if (!isProduction && redirectUrl.protocol !== 'https:' && redirectUrl.hostname !== 'localhost' && redirectUrl.hostname !== '127.0.0.1') {
-        warnings.push(`redirectUri uses unencrypted HTTP on non-localhost hostname '${redirectUrl.hostname}'`);
+      const localHttpRedirect = redirectUrl.protocol === 'http:' &&
+        ['localhost', '127.0.0.1'].includes(redirectUrl.hostname);
+      if (redirectUrl.protocol !== 'https:') {
+        if (isProduction) {
+          errors.push(`redirectUri must use HTTPS in production (received '${redirectUrl.protocol}')`);
+        } else if (!localHttpRedirect) {
+          errors.push('redirectUri must use HTTPS except for localhost during non-production development');
+        }
       }
     } catch {
       errors.push('redirectUri is not a valid absolute URL');
@@ -180,6 +192,9 @@ export function validateOIDCConfig(
   if (config.cookieSameSite && !['none', 'lax', 'strict'].includes(config.cookieSameSite)) {
     errors.push("cookieSameSite must be 'none', 'lax', or 'strict'");
   }
+  if (!config.cookieSecure && isProduction) {
+    errors.push('cookieSecure must be true in production');
+  }
   if (config.cookieSameSite === 'none' && !config.cookieSecure && isProduction) {
     errors.push("cookieSecure must be true when cookieSameSite is 'none' in production");
   }
@@ -210,13 +225,8 @@ export function getOIDCConfig(env: NodeJS.ProcessEnv = process.env): OIDCConfig 
   const enabled = env.OIDC_ENABLED === 'true';
   const isProduction = env.NODE_ENV === 'production';
 
-  const transactionTtl = env.OIDC_TRANSACTION_TTL_SECONDS
-    ? parseInt(env.OIDC_TRANSACTION_TTL_SECONDS, 10)
-    : DEFAULT_TRANSACTION_TTL_SECONDS;
-
-  const clockSkew = env.OIDC_CLOCK_SKEW_SECONDS
-    ? parseInt(env.OIDC_CLOCK_SKEW_SECONDS, 10)
-    : DEFAULT_CLOCK_SKEW_TOLERANCE_SECONDS;
+  const transactionTtl = parseIntegerSetting(env.OIDC_TRANSACTION_TTL_SECONDS, DEFAULT_TRANSACTION_TTL_SECONDS);
+  const clockSkew = parseIntegerSetting(env.OIDC_CLOCK_SKEW_SECONDS, DEFAULT_CLOCK_SKEW_TOLERANCE_SECONDS);
 
   const cookieSameSite = (env.OIDC_COOKIE_SAMESITE as 'none' | 'lax' | 'strict') || (isProduction ? 'none' : 'lax');
   const cookieSecure = env.OIDC_COOKIE_SECURE ? env.OIDC_COOKIE_SECURE === 'true' : isProduction;
@@ -235,8 +245,8 @@ export function getOIDCConfig(env: NodeJS.ProcessEnv = process.env): OIDCConfig 
     jwksUri: env.OIDC_JWKS_URI || DEFAULT_OIDC_JWKS_URI,
     redirectUri: env.GOOGLE_REDIRECT_URI || '',
     allowedScopes: scopes.includes('openid') ? scopes : ['openid', ...scopes],
-    transactionTtlSeconds: isNaN(transactionTtl) ? DEFAULT_TRANSACTION_TTL_SECONDS : transactionTtl,
-    clockSkewToleranceSeconds: isNaN(clockSkew) ? DEFAULT_CLOCK_SKEW_TOLERANCE_SECONDS : clockSkew,
+    transactionTtlSeconds: transactionTtl,
+    clockSkewToleranceSeconds: clockSkew,
     cookieSameSite,
     cookieSecure
   };

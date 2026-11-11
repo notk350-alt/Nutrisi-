@@ -32,6 +32,7 @@ import { defaultSessionStore } from '../auth/sessionStore';
 import { defaultRoleApprovalEngine, RoleApprovalEngine } from '../auth/roleApprovalEngine';
 import { RoleRequest, User } from '../database/types';
 import { hasPermission } from '../auth/rbacMiddleware';
+import { createLowdbJsonDatabase } from '../database/adapters/lowdbJsonDatabase';
 
 function createTestApp() {
   const app = express();
@@ -154,6 +155,59 @@ describe('NutriBodySim MVS-B2.5B.3: Secure Role Approval Engine', () => {
     researcherToken = defaultSessionStore.createSession('usr_researcher', 3600, 1).token;
     adminToken = defaultSessionStore.createSession('usr_admin', 3600, 1).token;
     mainAdminToken = defaultSessionStore.createSession('usr_main_admin', 3600, 1).token;
+  });
+
+  it('uses repository transactions for role approval mutations', async () => {
+    const repositories = createLowdbJsonDatabase(db);
+    const { roleRequest } = db.createRoleRequest({
+      userId: 'usr_student',
+      requestedRole: 'Researcher',
+      justification: 'Repository transaction test request.'
+    });
+    const session = defaultSessionStore.createSession('usr_student', 3600, 1);
+    const engine = new RoleApprovalEngine(repositories, defaultSessionStore);
+
+    const result = await engine.approve({
+      requestId: roleRequest.request_id,
+      reviewer: db.getState().users.find(user => user.id === 'usr_admin')!,
+      reviewReason: 'Verified qualifications through the repository path.'
+    });
+
+    expect(result.role_request.approval_status).toBe('APPROVED');
+    expect(db.getState().users.find(user => user.id === 'usr_student')?.token_version).toBe(2);
+    expect(defaultSessionStore.validateSession(session.token).valid).toBe(false);
+    expect(db.getState().audit_logs.some(log => log.entity_id === roleRequest.request_id && log.action === 'ROLE_APPROVAL')).toBe(true);
+  });
+
+  it('uses repository transactions for role rejection and cancellation', async () => {
+    const repositories = createLowdbJsonDatabase(db);
+    const rejectRequest = db.createRoleRequest({
+      userId: 'usr_student',
+      requestedRole: 'Lecturer',
+      justification: 'Repository transaction rejection test.'
+    }).roleRequest;
+    const cancelRequest = db.createRoleRequest({
+      userId: 'usr_researcher',
+      requestedRole: 'Student',
+      justification: 'Repository transaction cancellation test.'
+    }).roleRequest;
+    const engine = new RoleApprovalEngine(repositories, defaultSessionStore);
+
+    await engine.reject({
+      requestId: rejectRequest.request_id,
+      reviewer: db.getState().users.find(user => user.id === 'usr_admin')!,
+      reviewReason: 'The submitted teaching evidence is incomplete.'
+    });
+    await engine.cancel({
+      requestId: cancelRequest.request_id,
+      caller: db.getState().users.find(user => user.id === 'usr_researcher')!
+    });
+
+    expect(db.findRoleRequestById(rejectRequest.request_id)?.approval_status).toBe('REJECTED');
+    expect(db.findRoleRequestById(cancelRequest.request_id)?.approval_status).toBe('CANCELLED');
+    expect(db.getState().audit_logs.filter(log =>
+      [rejectRequest.request_id, cancelRequest.request_id].includes(log.entity_id) && log.action === 'ROLE_APPROVAL'
+    )).toHaveLength(2);
   });
 
   // -------------------------------------------------------------------------

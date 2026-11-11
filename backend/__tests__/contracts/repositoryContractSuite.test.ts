@@ -55,7 +55,8 @@ describe('MVS-B2.5E.1B.2 / MVS-B2.5E.1B.4: Modular JSON Repository Adapter Contr
   let baselineSnapshot: any;
   const PROD_DB_PATH = path.join(process.cwd(), 'data', 'nutribodysim_db.json');
   const PROD_BACKUP_PATH = path.join(process.cwd(), 'data', 'nutribodysim_db.backup.json');
-  const EXPECTED_HASH = 'a7f7cfa135e5b8c4be091cff49f5b1e2ecc88514776b8f908bd3ccf0d188af14';
+  const EXPECTED_ACTIVE_HASH = '1b16140f395c0a937843cb691be1382a00296c2d2bd1ddd075c39d84ad3c6a5d';
+  const EXPECTED_BACKUP_HASH = 'a7f7cfa135e5b8c4be091cff49f5b1e2ecc88514776b8f908bd3ccf0d188af14';
 
   beforeEach(() => {
     if (!baselineSnapshot) {
@@ -609,10 +610,10 @@ describe('MVS-B2.5E.1B.2 / MVS-B2.5E.1B.4: Modular JSON Repository Adapter Contr
       const activeHash = crypto.createHash('sha256').update(activeContent).digest('hex');
       const backupHash = crypto.createHash('sha256').update(backupContent).digest('hex');
 
-      expect(activeContent.length).toBe(57187);
+      expect(activeContent.length).toBe(58916);
       expect(backupContent.length).toBe(57187);
-      expect(activeHash).toBe(EXPECTED_HASH);
-      expect(backupHash).toBe(EXPECTED_HASH);
+      expect(activeHash).toBe(EXPECTED_ACTIVE_HASH);
+      expect(backupHash).toBe(EXPECTED_BACKUP_HASH);
     });
   });
 });

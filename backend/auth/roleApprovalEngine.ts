@@ -7,7 +7,9 @@
  */
 
 import { User, RoleRequest, RequestedRole, AuditLog } from '../database/types';
-import { DatabaseStore, db } from '../database/store';
+import type { DatabaseStore } from '../database/store';
+import type { IDatabaseRepositories } from '../database/contracts';
+import { getRuntimeDb, getRuntimeRepositories, getRuntimeSelection, resolveDatabaseProvider } from '../database/runtime';
 import { ISessionStore, defaultSessionStore } from './sessionStore';
 import { hasPermission, ROLE_DEFAULT_PERMISSIONS } from './rbacMiddleware';
 
@@ -32,12 +34,32 @@ export interface RoleApprovalResult {
 }
 
 export class RoleApprovalEngine {
-  private database: DatabaseStore;
+  private readonly database?: DatabaseStore | IDatabaseRepositories;
   private sessionStore: ISessionStore;
 
-  constructor(database: DatabaseStore = db, sessionStore: ISessionStore = defaultSessionStore) {
+  constructor(database?: DatabaseStore | IDatabaseRepositories, sessionStore: ISessionStore = defaultSessionStore) {
     this.database = database;
     this.sessionStore = sessionStore;
+  }
+
+  private get repositories(): IDatabaseRepositories | undefined {
+    const runtime = getRuntimeSelection();
+    if (resolveDatabaseProvider() === 'postgres') {
+      if (runtime?.provider !== 'postgres') {
+        throw new Error('PostgreSQL runtime must be initialized before processing role approvals.');
+      }
+      if (this.database && this.database !== runtime.repositories) {
+        throw new Error('Role approval must use the initialized PostgreSQL repositories.');
+      }
+      return getRuntimeRepositories();
+    }
+    if (this.database && 'unitOfWork' in this.database) return this.database;
+    return undefined;
+  }
+
+  private get store(): DatabaseStore {
+    if (this.database && !('unitOfWork' in this.database)) return this.database;
+    return getRuntimeDb();
   }
 
   /**
@@ -120,9 +142,13 @@ export class RoleApprovalEngine {
     ipAddress?: string;
   }): Promise<RoleApprovalResult> {
     const { requestId, reviewer, reviewReason, ipAddress } = params;
+    const repositories = this.repositories;
+    if (repositories) {
+      return this.approveWithRepositories(repositories, params);
+    }
 
     // 1. Storage retrieval & state validation
-    const roleRequest = this.database.findRoleRequestById(requestId);
+    const roleRequest = this.store.findRoleRequestById(requestId);
     if (!roleRequest) {
       const err: any = new Error(`Role request '${requestId}' not found.`);
       err.statusCode = 404;
@@ -151,7 +177,7 @@ export class RoleApprovalEngine {
     }
 
     // 4. Validate Target User existence and account status
-    const state = this.database.getState();
+    const state = this.store.getState();
     const targetUser = state.users.find((u: User) => u.id === roleRequest.user_id);
     if (!targetUser) {
       const err: any = new Error(`Target user '${roleRequest.user_id}' not found in registry.`);
@@ -170,7 +196,7 @@ export class RoleApprovalEngine {
     }
 
     // 5. Execute atomic transaction in DatabaseStore
-    const result = this.database.approveRoleRequest({
+    const result = this.store.approveRoleRequest({
       requestId,
       reviewerId: reviewer.id,
       reviewReason,
@@ -213,9 +239,13 @@ export class RoleApprovalEngine {
     ipAddress?: string;
   }): Promise<RoleApprovalResult> {
     const { requestId, reviewer, reviewReason, ipAddress } = params;
+    const repositories = this.repositories;
+    if (repositories) {
+      return this.rejectWithRepositories(repositories, params);
+    }
 
     // 1. Storage retrieval & state validation
-    const roleRequest = this.database.findRoleRequestById(requestId);
+    const roleRequest = this.store.findRoleRequestById(requestId);
     if (!roleRequest) {
       const err: any = new Error(`Role request '${requestId}' not found.`);
       err.statusCode = 404;
@@ -252,7 +282,7 @@ export class RoleApprovalEngine {
     }
 
     // 5. Execute atomic rejection in DatabaseStore
-    const result = this.database.rejectRoleRequest({
+    const result = this.store.rejectRoleRequest({
       requestId,
       reviewerId: reviewer.id,
       reviewReason,
@@ -276,8 +306,12 @@ export class RoleApprovalEngine {
     ipAddress?: string;
   }): Promise<RoleApprovalResult> {
     const { requestId, caller, ipAddress } = params;
+    const repositories = this.repositories;
+    if (repositories) {
+      return this.cancelWithRepositories(repositories, params);
+    }
 
-    const roleRequest = this.database.findRoleRequestById(requestId);
+    const roleRequest = this.store.findRoleRequestById(requestId);
     if (!roleRequest) {
       const err: any = new Error(`Role request '${requestId}' not found.`);
       err.statusCode = 404;
@@ -304,7 +338,7 @@ export class RoleApprovalEngine {
       throw err;
     }
 
-    const result = this.database.cancelRoleRequest({
+    const result = this.store.cancelRoleRequest({
       requestId,
       callerId: caller.id,
       ipAddress
@@ -316,6 +350,187 @@ export class RoleApprovalEngine {
       role_request: result.roleRequest,
       audit_log: result.auditLog
     };
+  }
+
+  private async approveWithRepositories(
+    repositories: IDatabaseRepositories,
+    params: { requestId: string; reviewer: User; reviewReason?: string; ipAddress?: string }
+  ): Promise<RoleApprovalResult> {
+    return repositories.unitOfWork.runInTransaction(async tx => {
+      const roleRequest = await repositories.roleRequests.findById(params.requestId, tx);
+      if (!roleRequest) throw this.roleRequestError(params.requestId, 'NOT_FOUND', 404);
+      if (roleRequest.approval_status !== 'PENDING') {
+        throw this.finalizedError(roleRequest, 'cannot be processed again.');
+      }
+
+      const reviewer = await repositories.users.findById(params.reviewer.id, tx);
+      if (!reviewer) throw this.domainError(`Reviewer '${params.reviewer.id}' not found in registry.`, 'REVIEWER_NOT_FOUND', 404);
+      const authCheck = this.verifyReviewerAuthority(reviewer, roleRequest);
+      if (!authCheck.allowed) {
+        throw this.domainError(authCheck.errorMessage || 'Reviewer authority check failed.', authCheck.errorCode || 'FORBIDDEN', authCheck.statusCode || 403);
+      }
+
+      const targetUser = await repositories.users.findById(roleRequest.user_id, tx);
+      if (!targetUser) throw this.domainError(`Target user '${roleRequest.user_id}' not found in registry.`, 'USER_NOT_FOUND', 404);
+      if (targetUser.account_status && targetUser.account_status !== 'ACTIVE') {
+        throw this.domainError(
+          `Target user has account status '${targetUser.account_status}'. Role elevation cannot be approved for inactive or suspended users.`,
+          'TARGET_NOT_ACTIVE',
+          403
+        );
+      }
+
+      const now = new Date().toISOString();
+      const sanitizedReason = params.reviewReason?.trim().replace(/<[^>]*>/g, '') || 'Role elevation approved by administrator.';
+      const updatedUser = await repositories.users.update(targetUser.id, {
+        role: roleRequest.requested_role,
+        permissions: [...(ROLE_DEFAULT_PERMISSIONS[roleRequest.requested_role] || [])],
+        token_version: (targetUser.token_version || 1) + 1,
+        updated_at: now
+      }, tx);
+      const updatedRequest = await repositories.roleRequests.updateStatus(
+        roleRequest.request_id,
+        'APPROVED',
+        reviewer.id,
+        sanitizedReason,
+        tx,
+        'PENDING'
+      );
+      await repositories.sessions.revokeSessionsForUser(targetUser.id, tx);
+      const auditLog = await repositories.auditLogs.appendLog({
+        user_id: reviewer.id,
+        user_name: reviewer.name,
+        action: 'ROLE_APPROVAL',
+        entity_type: 'ROLE_REQUEST',
+        entity_id: roleRequest.request_id,
+        details: `Role request ${roleRequest.request_id} APPROVED by ${reviewer.name} (${reviewer.id}): ${targetUser.name} (${targetUser.id}) elevated from ${targetUser.role} to ${updatedUser.role}.`,
+        ip_address: params.ipAddress || '127.0.0.1',
+        timestamp: now,
+        metadata: {
+          request_id: roleRequest.request_id,
+          requester_id: targetUser.id,
+          reviewer_id: reviewer.id,
+          previous_role: targetUser.role,
+          new_role: updatedUser.role,
+          review_reason: sanitizedReason
+        }
+      }, tx);
+
+      return {
+        success: true,
+        message: 'Role elevation approved successfully.',
+        role_request: updatedRequest,
+        updated_user: {
+          id: updatedUser.id,
+          role: updatedUser.role,
+          updated_at: updatedUser.updated_at || now,
+          token_version: updatedUser.token_version
+        },
+        audit_log: auditLog
+      };
+    });
+  }
+
+  private async rejectWithRepositories(
+    repositories: IDatabaseRepositories,
+    params: { requestId: string; reviewer: User; reviewReason: string; ipAddress?: string }
+  ): Promise<RoleApprovalResult> {
+    return repositories.unitOfWork.runInTransaction(async tx => {
+      const roleRequest = await repositories.roleRequests.findById(params.requestId, tx);
+      if (!roleRequest) throw this.roleRequestError(params.requestId, 'NOT_FOUND', 404);
+      if (roleRequest.approval_status !== 'PENDING') {
+        throw this.finalizedError(roleRequest, 'cannot be processed again.');
+      }
+
+      const reviewer = await repositories.users.findById(params.reviewer.id, tx);
+      if (!reviewer) throw this.domainError(`Reviewer '${params.reviewer.id}' not found in registry.`, 'REVIEWER_NOT_FOUND', 404);
+      const authCheck = this.verifyReviewerAuthority(reviewer, roleRequest);
+      if (!authCheck.allowed) {
+        throw this.domainError(authCheck.errorMessage || 'Reviewer authority check failed.', authCheck.errorCode || 'FORBIDDEN', authCheck.statusCode || 403);
+      }
+      if (!params.reviewReason || typeof params.reviewReason !== 'string' || params.reviewReason.trim().length < 5) {
+        throw this.domainError('A comprehensive review_reason (minimum 5 characters) is required for role request rejection.', 'REVIEW_REASON_REQUIRED', 400);
+      }
+
+      const now = new Date().toISOString();
+      const sanitizedReason = params.reviewReason.trim().replace(/<[^>]*>/g, '');
+      const updatedRequest = await repositories.roleRequests.updateStatus(
+        roleRequest.request_id,
+        'REJECTED',
+        reviewer.id,
+        sanitizedReason,
+        tx,
+        'PENDING'
+      );
+      const auditLog = await repositories.auditLogs.appendLog({
+        user_id: reviewer.id,
+        user_name: reviewer.name,
+        action: 'ROLE_APPROVAL',
+        entity_type: 'ROLE_REQUEST',
+        entity_id: roleRequest.request_id,
+        details: `Role request ${roleRequest.request_id} REJECTED by ${reviewer.name} (${reviewer.id}) for requested role ${roleRequest.requested_role}. Reason: ${sanitizedReason}`,
+        ip_address: params.ipAddress || '127.0.0.1',
+        timestamp: now
+      }, tx);
+      return { success: true, message: 'Role elevation rejected.', role_request: updatedRequest, audit_log: auditLog };
+    });
+  }
+
+  private async cancelWithRepositories(
+    repositories: IDatabaseRepositories,
+    params: { requestId: string; caller: User; ipAddress?: string }
+  ): Promise<RoleApprovalResult> {
+    return repositories.unitOfWork.runInTransaction(async tx => {
+      const roleRequest = await repositories.roleRequests.findById(params.requestId, tx);
+      if (!roleRequest) throw this.roleRequestError(params.requestId, 'NOT_FOUND', 404);
+      if (roleRequest.approval_status !== 'PENDING') {
+        throw this.finalizedError(roleRequest, 'cannot be cancelled.');
+      }
+      if (roleRequest.user_id !== params.caller.id) {
+        throw this.domainError('You may only cancel your own role elevation requests.', 'FORBIDDEN_NOT_OWNER', 403);
+      }
+
+      const caller = await repositories.users.findById(params.caller.id, tx);
+      const now = new Date().toISOString();
+      const updatedRequest = await repositories.roleRequests.updateStatus(
+        roleRequest.request_id,
+        'CANCELLED',
+        params.caller.id,
+        'Cancelled by requester.',
+        tx,
+        'PENDING'
+      );
+      const auditLog = await repositories.auditLogs.appendLog({
+        user_id: params.caller.id,
+        user_name: caller?.name || params.caller.name,
+        action: 'ROLE_APPROVAL',
+        entity_type: 'ROLE_REQUEST',
+        entity_id: roleRequest.request_id,
+        details: `Role request ${roleRequest.request_id} CANCELLED by owner ${caller?.name || params.caller.name}.`,
+        ip_address: params.ipAddress || '127.0.0.1',
+        timestamp: now
+      }, tx);
+      return { success: true, message: 'Role request cancelled by owner.', role_request: updatedRequest, audit_log: auditLog };
+    });
+  }
+
+  private domainError(message: string, code: string, statusCode: number): Error {
+    return Object.assign(new Error(message), { code, statusCode });
+  }
+
+  private roleRequestError(requestId: string, code: string, statusCode: number): Error {
+    return this.domainError(`Role request '${requestId}' not found.`, code, statusCode);
+  }
+
+  private finalizedError(roleRequest: RoleRequest, suffix: string): Error {
+    return Object.assign(
+      this.domainError(
+        `Role request is already finalized with status '${roleRequest.approval_status}' and ${suffix}`,
+        'ALREADY_FINALIZED',
+        409
+      ),
+      { current_status: roleRequest.approval_status }
+    );
   }
 }
 

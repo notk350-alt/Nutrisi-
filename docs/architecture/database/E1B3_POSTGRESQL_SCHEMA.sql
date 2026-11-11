@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS scientific_references (
     reference_id VARCHAR(64) PRIMARY KEY,
     title TEXT NOT NULL,
     authors JSONB NOT NULL, -- Array of author strings: ["Vance, E.", "Brody, M."]
-    year INTEGER NOT NULL CHECK (year >= 1800 AND year <= 2100),
+    year INTEGER NOT NULL CONSTRAINT scientific_references_year_check CHECK (year >= 1800 AND year <= 2100),
     journal_or_publisher TEXT NOT NULL,
     doi VARCHAR(128),
     citation_key VARCHAR(64) UNIQUE,
@@ -59,14 +59,14 @@ CREATE TABLE IF NOT EXISTS scientific_variables (
     name VARCHAR(128) NOT NULL,
     label VARCHAR(128) NOT NULL,
     definition TEXT,
-    datatype VARCHAR(32) NOT NULL CHECK (datatype IN ('number', 'string', 'boolean', 'integer', 'array', 'object')),
-    unit VARCHAR(32) NOT NULL, -- Note: matches scientific_units.symbol ('kg', 'm', 'yr', etc.)
+    datatype VARCHAR(32) NOT NULL CONSTRAINT scientific_variables_datatype_check CHECK (datatype IN ('number', 'integer', 'boolean', 'string', 'vector', 'matrix')),
+    unit VARCHAR(32) NOT NULL REFERENCES scientific_units(symbol) ON DELETE RESTRICT,
     measurement_type VARCHAR(64) NOT NULL,
     allowed_range JSONB, -- { min, max, warning_min, warning_max }
     population VARCHAR(128),
     source_reference VARCHAR(64) REFERENCES scientific_references(reference_id) ON DELETE SET NULL,
     version VARCHAR(32) NOT NULL DEFAULT '1.0.0',
-    status VARCHAR(32) NOT NULL DEFAULT 'EXPERIMENTAL' CHECK (status IN ('DRAFT', 'EXPERIMENTAL', 'VERIFIED', 'DEPRECATED')),
+    status VARCHAR(32) NOT NULL DEFAULT 'EXPERIMENTAL' CONSTRAINT scientific_variables_status_check CHECK (status IN ('DRAFT', 'UNDER_REVIEW', 'VALIDATED', 'VALIDATION', 'VERIFIED', 'EXPERIMENTAL', 'DEPRECATED')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -80,10 +80,10 @@ CREATE TABLE IF NOT EXISTS scientific_parameters (
     name VARCHAR(128) NOT NULL,
     description TEXT,
     value JSONB NOT NULL, -- Supports scalar numbers, arrays, or matrix coefficients
-    unit VARCHAR(32) NOT NULL,
+    unit VARCHAR(32) NOT NULL REFERENCES scientific_units(symbol) ON DELETE RESTRICT,
     valid_range JSONB, -- { min, max }
     version VARCHAR(32) NOT NULL DEFAULT '1.0.0',
-    status VARCHAR(32) NOT NULL DEFAULT 'EXPERIMENTAL' CHECK (status IN ('DRAFT', 'EXPERIMENTAL', 'VERIFIED', 'DEPRECATED')),
+    status VARCHAR(32) NOT NULL DEFAULT 'EXPERIMENTAL' CONSTRAINT scientific_parameters_status_check CHECK (status IN ('DRAFT', 'UNDER_REVIEW', 'VALIDATED', 'VALIDATION', 'VERIFIED', 'EXPERIMENTAL', 'DEPRECATED')),
     is_constant BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -106,7 +106,7 @@ CREATE TABLE IF NOT EXISTS scientific_formulas (
     name VARCHAR(128) NOT NULL,
     description TEXT,
     version VARCHAR(32) NOT NULL DEFAULT '1.0.0',
-    status VARCHAR(32) NOT NULL DEFAULT 'EXPERIMENTAL' CHECK (status IN ('DRAFT', 'EXPERIMENTAL', 'VERIFIED', 'DEPRECATED')),
+    status VARCHAR(32) NOT NULL DEFAULT 'EXPERIMENTAL' CONSTRAINT scientific_formulas_status_check CHECK (status IN ('DRAFT', 'UNDER_REVIEW', 'VALIDATED', 'VALIDATION', 'VERIFIED', 'EXPERIMENTAL', 'DEPRECATED')),
     inputs JSONB NOT NULL DEFAULT '[]', -- Array of FormulaInputSpec: [{ variable_id, name, unit, default_value, required }]
     outputs JSONB NOT NULL DEFAULT '[]', -- Array of FormulaOutputSpec: [{ name, unit, description }]
     expression_ast JSONB NOT NULL, -- Strongly-typed AST node hierarchy (Pure JSONB)
@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS scientific_algorithms (
     name VARCHAR(128) NOT NULL,
     description TEXT,
     version VARCHAR(32) NOT NULL DEFAULT '1.0.0',
-    status VARCHAR(32) NOT NULL DEFAULT 'EXPERIMENTAL' CHECK (status IN ('DRAFT', 'EXPERIMENTAL', 'VERIFIED', 'DEPRECATED')),
+    status VARCHAR(32) NOT NULL DEFAULT 'EXPERIMENTAL' CONSTRAINT scientific_algorithms_status_check CHECK (status IN ('DRAFT', 'UNDER_REVIEW', 'VALIDATED', 'VALIDATION', 'VERIFIED', 'EXPERIMENTAL', 'DEPRECATED')),
     inputs JSONB NOT NULL DEFAULT '[]',
     outputs JSONB NOT NULL DEFAULT '[]',
     entry_step_id VARCHAR(64),
@@ -180,7 +180,7 @@ CREATE TABLE IF NOT EXISTS scientific_models (
     name VARCHAR(128) NOT NULL,
     description TEXT,
     version VARCHAR(32) NOT NULL DEFAULT '1.0.0',
-    status VARCHAR(32) NOT NULL DEFAULT 'EXPERIMENTAL' CHECK (status IN ('DRAFT', 'EXPERIMENTAL', 'VERIFIED', 'DEPRECATED')),
+    status VARCHAR(32) NOT NULL DEFAULT 'EXPERIMENTAL' CONSTRAINT scientific_models_status_check CHECK (status IN ('DRAFT', 'UNDER_REVIEW', 'VALIDATED', 'VALIDATION', 'VERIFIED', 'EXPERIMENTAL', 'DEPRECATED')),
     is_verified BOOLEAN NOT NULL DEFAULT FALSE,
     parent_model_id VARCHAR(64), -- Self-reference for experimental branches/clones
     assumptions JSONB NOT NULL DEFAULT '[]',
@@ -237,7 +237,7 @@ CREATE TABLE IF NOT EXISTS scientific_interpretation_rules (
     name VARCHAR(128) NOT NULL,
     description TEXT,
     version VARCHAR(32) NOT NULL DEFAULT '1.0.0',
-    status VARCHAR(32) NOT NULL DEFAULT 'VERIFIED' CHECK (status IN ('DRAFT', 'EXPERIMENTAL', 'VERIFIED', 'DEPRECATED')),
+    status VARCHAR(32) NOT NULL DEFAULT 'VERIFIED' CONSTRAINT scientific_interpretation_rules_status_check CHECK (status IN ('DRAFT', 'UNDER_REVIEW', 'VALIDATED', 'VALIDATION', 'VERIFIED', 'EXPERIMENTAL', 'DEPRECATED')),
     target_variable_or_metric VARCHAR(64) NOT NULL,
     unit VARCHAR(32) NOT NULL,
     population VARCHAR(128),
@@ -266,13 +266,14 @@ CREATE TABLE IF NOT EXISTS users (
     email VARCHAR(255) NOT NULL UNIQUE,
     name VARCHAR(128) NOT NULL,
     display_name VARCHAR(128),
-    role VARCHAR(32) NOT NULL CHECK (role IN ('Administrator', 'Lead', 'Researcher', 'Lecturer', 'Student', 'Guest')),
+    role VARCHAR(32) NOT NULL CONSTRAINT users_role_check
+        CHECK (role IN ('RegisteredUser', 'Student', 'Lecturer', 'Researcher', 'Admin')),
     permissions JSONB NOT NULL DEFAULT '[]', -- Array of permission strings
     organization VARCHAR(255),
     avatar_url TEXT,
-    account_status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE' CHECK (account_status IN ('ACTIVE', 'PENDING', 'SUSPENDED', 'DEACTIVATED')),
+    account_status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE' CONSTRAINT users_account_status_check CHECK (account_status IN ('ACTIVE', 'SUSPENDED', 'DISABLED')),
     email_verified BOOLEAN NOT NULL DEFAULT FALSE,
-    provider VARCHAR(32) NOT NULL DEFAULT 'local' CHECK (provider IN ('local', 'google')),
+    provider VARCHAR(32) NOT NULL DEFAULT 'local' CONSTRAINT users_provider_check CHECK (provider IN ('local', 'google')),
     provider_subject_id VARCHAR(255),
     is_main_admin BOOLEAN NOT NULL DEFAULT FALSE,
     governance_granted_at TIMESTAMPTZ,
@@ -291,7 +292,7 @@ CREATE INDEX IF NOT EXISTS idx_users_provider_subject ON users (provider, provid
 CREATE TABLE IF NOT EXISTS external_identities (
     id VARCHAR(64) PRIMARY KEY,
     user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    provider VARCHAR(32) NOT NULL CHECK (provider IN ('google', 'local')),
+    provider VARCHAR(32) NOT NULL CONSTRAINT external_identities_provider_check CHECK (provider IN ('google', 'local')),
     provider_subject_id VARCHAR(255) NOT NULL,
     email VARCHAR(255),
     email_verified BOOLEAN NOT NULL DEFAULT FALSE,
@@ -305,8 +306,9 @@ CREATE INDEX IF NOT EXISTS idx_external_identities_user_id ON external_identitie
 CREATE TABLE IF NOT EXISTS role_requests (
     request_id VARCHAR(64) PRIMARY KEY,
     user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    requested_role VARCHAR(32) NOT NULL CHECK (requested_role IN ('analyst', 'researcher', 'lead')),
-    approval_status VARCHAR(32) NOT NULL DEFAULT 'PENDING' CHECK (approval_status IN ('PENDING', 'APPROVED', 'REJECTED')),
+    requested_role VARCHAR(32) NOT NULL CONSTRAINT role_requests_requested_role_check
+        CHECK (requested_role IN ('Student', 'Lecturer', 'Researcher', 'Admin')),
+    approval_status VARCHAR(32) NOT NULL DEFAULT 'PENDING' CONSTRAINT role_requests_approval_status_check CHECK (approval_status IN ('PENDING', 'APPROVED', 'REJECTED', 'CANCELLED')),
     institution VARCHAR(255),
     justification TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -339,7 +341,7 @@ CREATE TABLE IF NOT EXISTS team_members (
     id VARCHAR(64) PRIMARY KEY,
     team_id VARCHAR(64) NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
     user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    role VARCHAR(32) NOT NULL CHECK (role IN ('Owner', 'Admin', 'Member', 'Viewer')),
+    role VARCHAR(32) NOT NULL CONSTRAINT team_members_role_check CHECK (role IN ('Owner', 'Editor', 'Collaborator', 'Viewer')),
     joined_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_team_members_team_user UNIQUE (team_id, user_id)
 );
@@ -351,7 +353,7 @@ CREATE TABLE IF NOT EXISTS projects (
     id VARCHAR(64) PRIMARY KEY,
     name VARCHAR(128) NOT NULL,
     description TEXT,
-    type VARCHAR(32) NOT NULL CHECK (type IN ('Personal', 'Academic', 'Research', 'Experiment', 'Team', 'Assignment')),
+    type VARCHAR(32) NOT NULL CONSTRAINT projects_type_check CHECK (type IN ('Personal', 'Academic', 'Research', 'Experiment', 'Team', 'Assignment')),
     owner_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     team_id VARCHAR(64) REFERENCES teams(id) ON DELETE SET NULL,
     is_public BOOLEAN NOT NULL DEFAULT FALSE,
@@ -369,7 +371,7 @@ CREATE TABLE IF NOT EXISTS project_members (
     id VARCHAR(64) PRIMARY KEY,
     project_id VARCHAR(64) NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    role VARCHAR(32) NOT NULL CHECK (role IN ('Owner', 'Editor', 'Collaborator', 'Viewer')),
+    role VARCHAR(32) NOT NULL CONSTRAINT project_members_role_check CHECK (role IN ('Owner', 'Editor', 'Collaborator', 'Viewer')),
     joined_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_project_members_project_user UNIQUE (project_id, user_id)
 );
@@ -387,18 +389,19 @@ CREATE TABLE IF NOT EXISTS materials (
     title VARCHAR(255) NOT NULL,
     author VARCHAR(255),
     subject VARCHAR(128),
-    type VARCHAR(32) NOT NULL CHECK (type IN ('PDF', 'TXT', 'EPUB', 'MARKDOWN', 'DOCUMENT')),
+    type VARCHAR(32) NOT NULL CONSTRAINT materials_type_check CHECK (type IN ('PDF', 'TXT', 'EPUB', 'DOCX', 'PPTX', 'XLSX', 'CSV', 'IMAGE')),
     description TEXT,
-    year INTEGER CHECK (year >= 1800 AND year <= 2100),
+    year INTEGER CONSTRAINT materials_year_check CHECK (year >= 1800 AND year <= 2100),
     publisher VARCHAR(255),
     language VARCHAR(16) DEFAULT 'en',
+    url TEXT,
     source VARCHAR(255),
     license VARCHAR(64),
     tags JSONB NOT NULL DEFAULT '[]',
     version VARCHAR(32) DEFAULT '1.0.0',
     uploaded_by VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     file_path TEXT NOT NULL,
-    file_size_bytes BIGINT NOT NULL CHECK (file_size_bytes >= 0),
+    file_size_bytes BIGINT NOT NULL CONSTRAINT materials_file_size_bytes_check CHECK (file_size_bytes >= 0),
     mime_type VARCHAR(64) NOT NULL,
     file_hash VARCHAR(128),
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -439,7 +442,7 @@ CREATE TABLE IF NOT EXISTS reading_progress (
     material_id VARCHAR(64) NOT NULL REFERENCES materials(id) ON DELETE CASCADE,
     last_page INTEGER NOT NULL DEFAULT 1,
     total_pages INTEGER NOT NULL DEFAULT 1,
-    progress_pct DOUBLE PRECISION NOT NULL DEFAULT 0.0 CHECK (progress_pct >= 0.0 AND progress_pct <= 100.0),
+    progress_pct DOUBLE PRECISION NOT NULL DEFAULT 0.0 CONSTRAINT reading_progress_progress_pct_check CHECK (progress_pct >= 0.0 AND progress_pct <= 100.0),
     scroll_position DOUBLE PRECISION DEFAULT 0.0,
     last_accessed TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_reading_progress_user_material UNIQUE (user_id, material_id)
@@ -452,7 +455,7 @@ CREATE TABLE IF NOT EXISTS bookmarks (
     id VARCHAR(64) PRIMARY KEY,
     user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     material_id VARCHAR(64) NOT NULL REFERENCES materials(id) ON DELETE CASCADE,
-    page INTEGER NOT NULL CHECK (page >= 1),
+    page INTEGER NOT NULL CONSTRAINT bookmarks_page_check CHECK (page >= 1),
     title VARCHAR(255) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -464,7 +467,7 @@ CREATE TABLE IF NOT EXISTS highlights (
     id VARCHAR(64) PRIMARY KEY,
     user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     material_id VARCHAR(64) NOT NULL REFERENCES materials(id) ON DELETE CASCADE,
-    page INTEGER NOT NULL CHECK (page >= 1),
+    page INTEGER NOT NULL CONSTRAINT highlights_page_check CHECK (page >= 1),
     selected_text TEXT NOT NULL,
     color VARCHAR(32) NOT NULL DEFAULT 'yellow',
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -515,7 +518,7 @@ CREATE TABLE IF NOT EXISTS dataset_versions (
     dataset_id VARCHAR(64) NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
     version_tag VARCHAR(32) NOT NULL, -- e.g. "v1.0", "v1.1"
     parent_version_tag VARCHAR(32),
-    state VARCHAR(32) NOT NULL CHECK (state IN ('RAW', 'WORKING_COPY', 'CLEANED', 'VALIDATED', 'ANALYSIS_READY')),
+    state VARCHAR(32) NOT NULL CONSTRAINT dataset_versions_state_check CHECK (state IN ('RAW', 'WORKING_COPY', 'CLEANED', 'VALIDATED', 'ANALYSIS_READY')),
     columns JSONB NOT NULL, -- Schema metadata: [{ name, detected_type, role, nullable }]
     data JSONB NOT NULL, -- Tabular payload: array of JSON rows [{ subject_id, sex, ... }]
     validation_report JSONB NOT NULL, -- { is_valid, row_count, column_count, null_counts, warnings }
@@ -534,7 +537,7 @@ CREATE TABLE IF NOT EXISTS statistics_analyses (
     project_id VARCHAR(64) NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     dataset_version_id VARCHAR(64) NOT NULL REFERENCES dataset_versions(id) ON DELETE CASCADE,
     title VARCHAR(255) NOT NULL,
-    analysis_type VARCHAR(64) NOT NULL CHECK (analysis_type IN (
+    analysis_type VARCHAR(64) NOT NULL CONSTRAINT statistics_analyses_analysis_type_check CHECK (analysis_type IN (
         'DESCRIPTIVE', 'TWO_GROUP_COMPARISON', 'MULTIPLE_GROUP_ANOVA',
         'CORRELATION', 'LINEAR_REGRESSION', 'DIAGNOSTICS'
     )),
@@ -557,7 +560,7 @@ CREATE TABLE IF NOT EXISTS charts (
     dataset_version_id VARCHAR(64) REFERENCES dataset_versions(id) ON DELETE SET NULL,
     analysis_id VARCHAR(64) REFERENCES statistics_analyses(id) ON DELETE SET NULL,
     title VARCHAR(255) NOT NULL,
-    chart_type VARCHAR(32) NOT NULL CHECK (chart_type IN ('SCATTER', 'LINE', 'BAR', 'BOXPLOT', 'HISTOGRAM', 'HEATMAP')),
+    chart_type VARCHAR(32) NOT NULL CONSTRAINT charts_chart_type_check CHECK (chart_type IN ('LINE', 'BAR', 'HISTOGRAM', 'SCATTER', 'BOX_PLOT')),
     x_field VARCHAR(64),
     y_field VARCHAR(64),
     group_by VARCHAR(64),
@@ -591,10 +594,11 @@ CREATE INDEX IF NOT EXISTS idx_notebooks_project ON notebooks (project_id);
 CREATE TABLE IF NOT EXISTS notebook_cells (
     id VARCHAR(64) PRIMARY KEY,
     notebook_id VARCHAR(64) NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
-    cell_type VARCHAR(32) NOT NULL CHECK (cell_type IN ('TEXT', 'CODE', 'ANALYSIS_ATTACHMENT', 'CHART_ATTACHMENT')),
-    order_index INTEGER NOT NULL CHECK (order_index >= 0),
+    cell_type VARCHAR(32) NOT NULL CONSTRAINT notebook_cells_cell_type_check CHECK (cell_type IN ('TEXT', 'DATA', 'FORMULA', 'CODE', 'CHART', 'TABLE', 'EXPERIMENT', 'REFERENCE')),
+    order_index INTEGER NOT NULL CONSTRAINT notebook_cells_order_index_check CHECK (order_index >= 0),
     title VARCHAR(255),
     content TEXT NOT NULL,
+    metadata JSONB,
     CONSTRAINT uq_notebook_cells_order UNIQUE (notebook_id, order_index)
 );
 
@@ -604,11 +608,11 @@ CREATE INDEX IF NOT EXISTS idx_notebook_cells_notebook ON notebook_cells (notebo
 CREATE TABLE IF NOT EXISTS code_executions (
     id VARCHAR(64) PRIMARY KEY,
     project_id VARCHAR(64) NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    language VARCHAR(32) NOT NULL CHECK (language IN ('PYTHON', 'R', 'SQL', 'JAVASCRIPT')),
+    language VARCHAR(32) NOT NULL CONSTRAINT code_executions_language_check CHECK (language IN ('PYTHON', 'R', 'SQL', 'JAVASCRIPT')),
     code TEXT NOT NULL,
     output TEXT NOT NULL,
     error TEXT,
-    execution_time_ms INTEGER NOT NULL CHECK (execution_time_ms >= 0),
+    execution_time_ms INTEGER NOT NULL CONSTRAINT code_executions_execution_time_ms_check CHECK (execution_time_ms >= 0),
     environment_info TEXT NOT NULL,
     executed_by VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -631,7 +635,7 @@ CREATE TABLE IF NOT EXISTS experiments (
     baseline_output JSONB NOT NULL, -- Simulation result metrics
     experimental_output JSONB NOT NULL, -- Simulated clone result metrics
     delta_summary TEXT,
-    status VARCHAR(32) NOT NULL DEFAULT 'COMPLETED' CHECK (status IN ('DRAFT', 'RUNNING', 'COMPLETED', 'FAILED')),
+    status VARCHAR(32) NOT NULL DEFAULT 'COMPLETED' CONSTRAINT experiments_status_check CHECK (status IN ('DRAFT', 'RUNNING', 'COMPLETED', 'FAILED')),
     provenance_hash VARCHAR(128) NOT NULL,
     created_by VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,

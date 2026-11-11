@@ -3,32 +3,28 @@ import { User, Project, Material, ScientificFormula, ScientificVariable, Dataset
 import { api } from './api';
 import { Header } from './components/layout/Header';
 import { Sidebar, TabId } from './components/layout/Sidebar';
-import { DashboardView } from './components/dashboard/DashboardView';
-import { ProjectsView } from './components/projects/ProjectsView';
-import { MaterialBankView } from './components/materials/MaterialBankView';
-import { ScientificRegistryView } from './components/scientific/ScientificRegistryView';
-import { CalculatorView } from './components/calculator/CalculatorView';
-import { DataLabView } from './components/datalab/DataLabView';
-import { StatisticsLabView } from './components/statistics/StatisticsLabView';
-import { CodeLabView } from './components/codelab/CodeLabView';
-import { NotebookView } from './components/notebook/NotebookView';
-import { ExperimentSandboxView } from './components/experiments/ExperimentSandboxView';
-import { ProvenanceAuditView } from './components/provenance/ProvenanceAuditView';
-import { ScientificContributionGuideView } from './components/docs/ScientificContributionGuideView';
-import { ResearchWorkspaceView } from './components/research/ResearchWorkspaceView';
-import { GlobalSearchModal } from './components/search/GlobalSearchModal';
+import { SignInView } from './components/auth/SignInView';
+
+const DashboardView = React.lazy(() => import('./components/dashboard/DashboardView').then(module => ({ default: module.DashboardView })));
+const ProjectsView = React.lazy(() => import('./components/projects/ProjectsView').then(module => ({ default: module.ProjectsView })));
+const MaterialBankView = React.lazy(() => import('./components/materials/MaterialBankView').then(module => ({ default: module.MaterialBankView })));
+const ScientificRegistryView = React.lazy(() => import('./components/scientific/ScientificRegistryView').then(module => ({ default: module.ScientificRegistryView })));
+const CalculatorView = React.lazy(() => import('./components/calculator/CalculatorView').then(module => ({ default: module.CalculatorView })));
+const DataLabView = React.lazy(() => import('./components/datalab/DataLabView').then(module => ({ default: module.DataLabView })));
+const StatisticsLabView = React.lazy(() => import('./components/statistics/StatisticsLabView').then(module => ({ default: module.StatisticsLabView })));
+const CodeLabView = React.lazy(() => import('./components/codelab/CodeLabView').then(module => ({ default: module.CodeLabView })));
+const NotebookView = React.lazy(() => import('./components/notebook/NotebookView').then(module => ({ default: module.NotebookView })));
+const ExperimentSandboxView = React.lazy(() => import('./components/experiments/ExperimentSandboxView').then(module => ({ default: module.ExperimentSandboxView })));
+const ProvenanceAuditView = React.lazy(() => import('./components/provenance/ProvenanceAuditView').then(module => ({ default: module.ProvenanceAuditView })));
+const ScientificContributionGuideView = React.lazy(() => import('./components/docs/ScientificContributionGuideView').then(module => ({ default: module.ScientificContributionGuideView })));
+const ResearchWorkspaceView = React.lazy(() => import('./components/research/ResearchWorkspaceView').then(module => ({ default: module.ResearchWorkspaceView })));
+const GlobalSearchModal = React.lazy(() => import('./components/search/GlobalSearchModal').then(module => ({ default: module.GlobalSearchModal })));
 
 export function App() {
-  const [currentUser, setCurrentUser] = useState<User>({
-    id: 'usr_researcher',
-    email: 'elena.rostova@nutribodysim.org',
-    name: 'Dr. Elena Rostova',
-    role: 'Researcher',
-    permissions: ['VIEW', 'USE', 'CREATE', 'CLONE', 'VERIFY'],
-    institution: 'Metabolic Health Research Institute',
-    created_at: '2026-01-01T00:00:00Z',
-    last_login_at: '2026-09-21T10:00:00Z'
-  });
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [signInBusy, setSignInBusy] = useState(false);
+  const [signInError, setSignInError] = useState<string | null>(null);
   const [allUsers, setAllUsers] = useState<User[]>([]);
   const [activeTab, setActiveTab] = useState<TabId>('dashboard');
   const [projects, setProjects] = useState<Project[]>([]);
@@ -55,9 +51,8 @@ export function App() {
     try {
       // Initialize verified session
       const verifiedUser = await api.initSession();
-      if (verifiedUser) {
-        setCurrentUser(verifiedUser);
-      }
+      setCurrentUser(verifiedUser);
+      if (!verifiedUser) return;
 
       const [uRes, pRes, mRes, vRes, fRes, modRes, dRes, expRes, audRes] = await Promise.all([
         api.getAllUsers().catch(() => ({ users: [] })),
@@ -90,6 +85,8 @@ export function App() {
       });
     } catch (err) {
       console.error('Failed to load initial application state', err);
+    } finally {
+      setAuthReady(true);
     }
   };
 
@@ -120,6 +117,50 @@ export function App() {
     }
   };
 
+  const handleGoogleSignIn = async () => {
+    setSignInBusy(true);
+    setSignInError(null);
+    try {
+      const user = await api.signInWithGoogle();
+      setCurrentUser(user);
+      await loadInitialData();
+    } catch (error) {
+      setSignInError(error instanceof Error ? error.message : 'Google sign-in failed.');
+    } finally {
+      setSignInBusy(false);
+    }
+  };
+
+  const handleDemoSignIn = async () => {
+    setSignInBusy(true);
+    setSignInError(null);
+    try {
+      const result = await api.demoLogin('usr_researcher');
+      setCurrentUser(result.user);
+      await loadInitialData();
+    } catch (error) {
+      setSignInError(error instanceof Error ? error.message : 'Demo sign-in failed.');
+    } finally {
+      setSignInBusy(false);
+    }
+  };
+
+  if (!authReady) {
+    return <main className="min-h-screen bg-slate-950 text-slate-100 grid place-items-center">Memuat NutriBodySim...</main>;
+  }
+
+  if (!currentUser) {
+    return (
+      <SignInView
+        busy={signInBusy}
+        error={signInError}
+        isDevelopment={import.meta.env.DEV}
+        onGoogleSignIn={handleGoogleSignIn}
+        onDemoSignIn={handleDemoSignIn}
+      />
+    );
+  }
+
   const handleExecuteFormulaInCalculator = (formulaId: string) => {
     setPreselectedFormulaId(formulaId);
     setActiveTab('calculator');
@@ -130,7 +171,7 @@ export function App() {
       {/* Top Application Bar with Search Trigger */}
       <Header
         currentUser={currentUser}
-        allUsers={allUsers}
+        allUsers={import.meta.env.DEV ? allUsers : []}
         onSwitchUser={handleSwitchUser}
         activeTab={activeTab}
         onOpenSearch={() => setIsSearchOpen(true)}
@@ -146,13 +187,14 @@ export function App() {
 
         {/* Dynamic Workspace Canvas */}
         <main className={`flex-1 overflow-y-auto ${activeTab === 'dashboard' ? 'bg-slate-950 p-3 sm:p-6' : 'p-4 sm:p-6 lg:p-8'}`}>
-          {activeTab === 'dashboard' && (
-            <DashboardView
-              currentUser={currentUser}
-              onNavigate={setActiveTab}
-              stats={labStats}
-            />
-          )}
+          <React.Suspense fallback={<div className="p-6 text-sm text-slate-500">Memuat modul...</div>}>
+            {activeTab === 'dashboard' && (
+              <DashboardView
+                currentUser={currentUser}
+                onNavigate={setActiveTab}
+                stats={labStats}
+              />
+            )}
 
           {activeTab === 'projects' && (
             <ProjectsView
@@ -226,21 +268,26 @@ export function App() {
           {activeTab === 'docs' && (
             <ScientificContributionGuideView />
           )}
+          </React.Suspense>
         </main>
       </div>
 
       {/* Global Search Component Palette */}
-      <GlobalSearchModal
-        isOpen={isSearchOpen}
-        onClose={() => setIsSearchOpen(false)}
-        onNavigate={setActiveTab}
-        onSelectFormula={handleExecuteFormulaInCalculator}
-        projects={projects}
-        materials={materials}
-        formulas={formulas}
-        variables={variables}
-        datasets={datasets}
-      />
+      {isSearchOpen && (
+        <React.Suspense fallback={null}>
+          <GlobalSearchModal
+            isOpen={isSearchOpen}
+            onClose={() => setIsSearchOpen(false)}
+            onNavigate={setActiveTab}
+            onSelectFormula={handleExecuteFormulaInCalculator}
+            projects={projects}
+            materials={materials}
+            formulas={formulas}
+            variables={variables}
+            datasets={datasets}
+          />
+        </React.Suspense>
+      )}
     </div>
   );
 }

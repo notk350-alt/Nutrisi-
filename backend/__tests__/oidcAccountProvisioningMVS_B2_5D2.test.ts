@@ -23,6 +23,7 @@ import {
   VerifiedOIDCIdentity
 } from '../auth/oidc';
 import { db } from '../database/store';
+import { createLowdbJsonDatabase } from '../database/adapters/lowdbJsonDatabase';
 import { defaultSessionStore } from '../auth/sessionStore';
 import { User, ExternalIdentity } from '../database/types';
 
@@ -39,6 +40,30 @@ describe('MVS-B2.5D.2 — Transactional Account Provisioning & External Identity
   afterEach(() => {
     db.reseed();
     vi.restoreAllMocks();
+  });
+
+  it('provisions through repositories without relying on process-local locking', async () => {
+    const repositories = createLowdbJsonDatabase(db);
+    const repositoryProvisioner = new GoogleIdentityProvisioningService(repositories);
+    const identity: VerifiedOIDCIdentity = {
+      provider: 'google',
+      sub: 'google_sub_repository_transaction',
+      issuer: 'https://accounts.google.com',
+      audience: 'test-client-id',
+      issuedAt: Date.now() - 5000,
+      expiresAt: Date.now() + 3600000,
+      email: 'repository-provisioned@example.test',
+      emailVerified: true,
+      profile: { name: 'Repository User' }
+    };
+
+    const result = await repositoryProvisioner.provisionVerifiedGoogleIdentity(identity);
+
+    expect(result.outcome).toBe('PROVISIONED_NEW_ACCOUNT');
+    expect(result.user?.role).toBe('RegisteredUser');
+    expect(result.user?.permissions).toEqual([]);
+    expect(result.externalIdentity?.provider_subject_id).toBe(identity.sub);
+    expect(result.auditLog?.action).toBe('OIDC_ACCOUNT_PROVISION');
   });
 
   // ---------------------------------------------------------------------------

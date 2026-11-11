@@ -116,7 +116,9 @@ export class MemoryOIDCTransactionStore implements IOIDCTransactionStore {
       expiresAt,
       consumed: false,
       redirectUri: options?.redirectUri,
-      clientBinding: options?.clientBinding
+      clientBinding: options?.clientBinding,
+      purpose: options?.purpose ?? 'login',
+      targetUserId: options?.targetUserId
     };
 
     // 5. Store transaction and update secondary index

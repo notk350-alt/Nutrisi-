@@ -67,8 +67,8 @@ export interface User {
 
   // MVS-B2.5B Governance
   is_main_admin?: boolean;
-  governance_granted_at?: string;
-  governance_granted_by?: string;
+  governance_granted_at?: string | null;
+  governance_granted_by?: string | null;
   token_version?: number;
 }
 

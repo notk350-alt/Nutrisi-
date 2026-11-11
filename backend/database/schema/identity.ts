@@ -20,8 +20,10 @@ import {
   timestamp,
   jsonb,
   unique,
-  index
+  index,
+  check
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import type { Permission, UserRole, AccountStatus, RequestedRole, ApprovalStatus } from '../types';
 
 // ============================================================================
@@ -51,6 +53,9 @@ export const users = pgTable(
     lastLoginAt: timestamp('last_login_at', { withTimezone: true })
   },
   (table) => [
+    check('users_role_check', sql`${table.role} IN ('RegisteredUser', 'Student', 'Lecturer', 'Researcher', 'Admin')`),
+    check('users_account_status_check', sql`${table.accountStatus} IN ('ACTIVE', 'SUSPENDED', 'DISABLED')`),
+    check('users_provider_check', sql`${table.provider} IN ('local', 'google')`),
     index('idx_users_role').on(table.role),
     index('idx_users_account_status').on(table.accountStatus),
     index('idx_users_provider_subject').on(table.provider, table.providerSubjectId)
@@ -75,6 +80,7 @@ export const externalIdentities = pgTable(
   },
   (table) => [
     unique('uq_external_identities_provider_subject').on(table.provider, table.providerSubjectId),
+    check('external_identities_provider_check', sql`${table.provider} IN ('google', 'local')`),
     index('idx_external_identities_user_id').on(table.userId)
   ]
 );
@@ -99,6 +105,8 @@ export const roleRequests = pgTable(
     reviewReason: text('review_reason')
   },
   (table) => [
+    check('role_requests_requested_role_check', sql`${table.requestedRole} IN ('Student', 'Lecturer', 'Researcher', 'Admin')`),
+    check('role_requests_approval_status_check', sql`${table.approvalStatus} IN ('PENDING', 'APPROVED', 'REJECTED', 'CANCELLED')`),
     index('idx_role_requests_status').on(table.approvalStatus),
     index('idx_role_requests_user').on(table.userId)
   ]

@@ -10,7 +10,7 @@
  * - Zero dynamic code execution (no eval, no new Function)
  */
 
-import * as crypto from 'crypto';
+import { sha256Hex } from '../crypto';
 import { canonicalizeJson } from '../provenance/provenancePersistence';
 import { ResearchProject } from './researchProjectContracts';
 
@@ -200,6 +200,6 @@ export class ResearchProjectProvenance {
   public static computeHash(project: Omit<ResearchProject, 'provenance_hash'>): string {
     const payload = ResearchProjectProvenance.buildPayload(project);
     const canonical = canonicalizeJson(payload);
-    return crypto.createHash('sha256').update(canonical).digest('hex');
+    return sha256Hex(canonical);
   }
 }

@@ -7,10 +7,6 @@ import {
   defaultResearchWorkspaceService, 
   ResearchWorkspaceService 
 } from '../../services/researchWorkspaceService';
-import { ProjectCreationForm } from './ProjectCreationForm';
-import { DatasetBindingForm } from './DatasetBindingForm';
-import { VariablePlanningForm } from './VariablePlanningForm';
-import { AnalysisPlanForm } from './AnalysisPlanForm';
 import { 
   FolderKanban, 
   Database, 
@@ -24,6 +20,11 @@ import {
   CheckCircle2,
   Calculator
 } from 'lucide-react';
+
+const ProjectCreationForm = React.lazy(() => import('./ProjectCreationForm').then(module => ({ default: module.ProjectCreationForm })));
+const DatasetBindingForm = React.lazy(() => import('./DatasetBindingForm').then(module => ({ default: module.DatasetBindingForm })));
+const VariablePlanningForm = React.lazy(() => import('./VariablePlanningForm').then(module => ({ default: module.VariablePlanningForm })));
+const AnalysisPlanForm = React.lazy(() => import('./AnalysisPlanForm').then(module => ({ default: module.AnalysisPlanForm })));
 
 interface ResearchWorkspaceViewProps {
   service?: ResearchWorkspaceService;
@@ -254,36 +255,38 @@ export const ResearchWorkspaceView: React.FC<ResearchWorkspaceViewProps> = ({
 
       {/* Form Viewport */}
       <div>
-        {activeTab === 'CREATE_PROJECT' && (
-          <ProjectCreationForm
-            service={service}
-            onProjectCreated={handleProjectCreated}
-          />
-        )}
+        <React.Suspense fallback={<div className="py-8 text-sm text-slate-500">Loading research form...</div>}>
+          {activeTab === 'CREATE_PROJECT' && (
+            <ProjectCreationForm
+              service={service}
+              onProjectCreated={handleProjectCreated}
+            />
+          )}
 
-        {activeTab === 'BIND_DATASET' && activeProject && (
-          <DatasetBindingForm
-            project={activeProject}
-            service={service}
-            onProjectUpdated={handleProjectUpdated}
-          />
-        )}
+          {activeTab === 'BIND_DATASET' && activeProject && (
+            <DatasetBindingForm
+              project={activeProject}
+              service={service}
+              onProjectUpdated={handleProjectUpdated}
+            />
+          )}
 
-        {activeTab === 'PLAN_VARIABLES' && activeProject && (
-          <VariablePlanningForm
-            project={activeProject}
-            service={service}
-            onProjectUpdated={handleProjectUpdated}
-          />
-        )}
+          {activeTab === 'PLAN_VARIABLES' && activeProject && (
+            <VariablePlanningForm
+              project={activeProject}
+              service={service}
+              onProjectUpdated={handleProjectUpdated}
+            />
+          )}
 
-        {activeTab === 'PLAN_ANALYSIS' && activeProject && (
-          <AnalysisPlanForm
-            project={activeProject}
-            service={service}
-            onProjectUpdated={handleProjectUpdated}
-          />
-        )}
+          {activeTab === 'PLAN_ANALYSIS' && activeProject && (
+            <AnalysisPlanForm
+              project={activeProject}
+              service={service}
+              onProjectUpdated={handleProjectUpdated}
+            />
+          )}
+        </React.Suspense>
       </div>
     </div>
   );

@@ -31,7 +31,8 @@ import {
   ProvenanceRecord,
   RoleRequest
 } from '../database/types';
-import { db } from '../database/store';
+import { getRuntimeDb } from '../database/runtime';
+import type { IDatabaseRepositories } from '../database/contracts';
 import { getCurrentUser } from './authMiddleware';
 import { hasPermission } from './rbacMiddleware';
 
@@ -41,6 +42,71 @@ export interface ObjectAuthResult {
   allowed: boolean;
   reason?: string;
   isAdminOverride?: boolean;
+}
+
+export async function canAccessProjectWithRepositories(
+  repositories: Pick<IDatabaseRepositories, 'memberships'>,
+  user: User,
+  project: Project,
+  action: ObjectAction = 'READ'
+): Promise<ObjectAuthResult> {
+  if (user.account_status && user.account_status !== 'ACTIVE') {
+    return { allowed: false, reason: `Account is ${user.account_status}. Access to project is forbidden.` };
+  }
+  if (project.owner_id === user.id) return { allowed: true };
+
+  const projectMembers = await repositories.memberships.getProjectMembers(project.id);
+  const projectMember = projectMembers.find(member => member.user_id === user.id);
+  if (projectMember) {
+    if (action === 'READ') return { allowed: true };
+    if (action === 'WRITE' && ['Owner', 'Editor', 'Collaborator'].includes(projectMember.role)) return { allowed: true };
+    if (action === 'SHARE' && ['Owner', 'Editor'].includes(projectMember.role)) return { allowed: true };
+    if (action === 'DELETE' && projectMember.role === 'Owner') return { allowed: true };
+    if (action === 'MANAGE_MEMBERS' && projectMember.role === 'Owner') return { allowed: true };
+    return { allowed: false, reason: `Project member role "${projectMember.role}" lacks ${action} access.` };
+  }
+
+  if (project.team_id) {
+    const teamMembers = await repositories.memberships.getTeamMembers(project.team_id);
+    const teamMember = teamMembers.find(member => member.user_id === user.id);
+    if (teamMember) {
+      if (action === 'READ') return { allowed: true };
+      if (action === 'WRITE' && ['Owner', 'Editor', 'Collaborator'].includes(teamMember.role)) return { allowed: true };
+      if (action === 'SHARE' && ['Owner', 'Editor'].includes(teamMember.role)) return { allowed: true };
+      if (action === 'DELETE' && teamMember.role === 'Owner') return { allowed: true };
+      if (action === 'MANAGE_MEMBERS' && teamMember.role === 'Owner') return { allowed: true };
+      return { allowed: false, reason: `Team member role "${teamMember.role}" lacks ${action} access.` };
+    }
+  }
+
+  if (action === 'READ' && project.is_public) return { allowed: true };
+  if (hasPermission(user, 'ADMIN')) {
+    return { allowed: true, isAdminOverride: true, reason: `Admin governance override by ${user.name}` };
+  }
+  return { allowed: false, reason: `User "${user.id}" does not have ${action} permission on project "${project.id}".` };
+}
+
+export async function canAccessMaterialWithRepositories(
+  repositories: Pick<IDatabaseRepositories, 'memberships' | 'projects'>,
+  user: User,
+  material: Material,
+  action: ObjectAction = 'READ'
+): Promise<ObjectAuthResult> {
+  if (user.account_status && user.account_status !== 'ACTIVE') {
+    return { allowed: false, reason: `Account is ${user.account_status}. Access to material is forbidden.` };
+  }
+  if (material.uploaded_by === user.id) return { allowed: true };
+  if (action === 'READ') {
+    if (!material.project_ids?.length) return { allowed: true };
+    for (const projectId of material.project_ids) {
+      const project = await repositories.projects.findById(projectId);
+      if (project && (await canAccessProjectWithRepositories(repositories, user, project, 'READ')).allowed) {
+        return { allowed: true };
+      }
+    }
+  }
+  if (hasPermission(user, 'ADMIN')) return { allowed: true, isAdminOverride: true };
+  return { allowed: false, reason: `User lacks ${action} authorization for material "${material.id}".` };
 }
 
 /**
@@ -67,7 +133,7 @@ export function canAccessProject(
   }
 
   // 2. Project Member privileges
-  const state = db.getState();
+  const state = getRuntimeDb().getState();
   const projectMember = state.project_members.find(
     pm => pm.project_id === project.id && pm.user_id === user.id
   );
@@ -93,6 +159,12 @@ export function canAccessProject(
         return { allowed: true };
       }
       return { allowed: false, reason: `Only project owner can DELETE this project.` };
+    }
+    if (action === 'MANAGE_MEMBERS') {
+      if (projectMember.role === 'Owner') {
+        return { allowed: true };
+      }
+      return { allowed: false, reason: `Project member role "${projectMember.role}" lacks MANAGE_MEMBERS access.` };
     }
   }
 
@@ -123,6 +195,12 @@ export function canAccessProject(
           return { allowed: true };
         }
         return { allowed: false, reason: `Only team owner can DELETE project.` };
+      }
+      if (action === 'MANAGE_MEMBERS') {
+        if (teamMember.role === 'Owner') {
+          return { allowed: true };
+        }
+        return { allowed: false, reason: `Team member role "${teamMember.role}" lacks MANAGE_MEMBERS access.` };
       }
     }
   }
@@ -168,7 +246,7 @@ export function canAccessDataset(
     return { allowed: true };
   }
 
-  const state = db.getState();
+  const state = getRuntimeDb().getState();
   const parentProject = state.projects.find(p => p.id === dataset.project_id);
   if (parentProject) {
     return canAccessProject(user, parentProject, action);
@@ -205,7 +283,7 @@ export function canAccessNotebook(
     return { allowed: true };
   }
 
-  const state = db.getState();
+  const state = getRuntimeDb().getState();
   const parentProject = state.projects.find(p => p.id === notebook.project_id);
   if (parentProject) {
     return canAccessProject(user, parentProject, action);
@@ -236,7 +314,7 @@ export function canAccessNotebookCell(
     };
   }
 
-  const state = db.getState();
+  const state = getRuntimeDb().getState();
   const notebook = state.notebooks.find(nb => nb.id === cell.notebook_id);
   if (!notebook) {
     return { allowed: false, reason: `Notebook "${cell.notebook_id}" not found.` };
@@ -272,7 +350,7 @@ export function canAccessMaterial(
     }
 
     // If linked to projects, check if at least one project is accessible to the user
-    const state = db.getState();
+    const state = getRuntimeDb().getState();
     const hasAccessibleProject = material.project_ids.some(projId => {
       const proj = state.projects.find(p => p.id === projId);
       if (!proj) return false;
@@ -315,7 +393,7 @@ export function canAccessExperiment(
     return { allowed: true };
   }
 
-  const state = db.getState();
+  const state = getRuntimeDb().getState();
   const parentProject = state.projects.find(p => p.id === experiment.project_id);
   if (parentProject) {
     return canAccessProject(user, parentProject, action);
@@ -352,7 +430,7 @@ export function canAccessTeam(
     return { allowed: true };
   }
 
-  const state = db.getState();
+  const state = getRuntimeDb().getState();
   const member = state.team_members.find(tm => tm.team_id === team.id && tm.user_id === user.id);
 
   if (action === 'READ') {
@@ -366,6 +444,10 @@ export function canAccessTeam(
     }
     if (action === 'DELETE' || action === 'SHARE') {
       if (member.role === 'Owner') return { allowed: true };
+    }
+    if (action === 'MANAGE_MEMBERS') {
+      if (member.role === 'Owner') return { allowed: true };
+      return { allowed: false, reason: `Team member role "${member.role}" lacks MANAGE_MEMBERS access.` };
     }
   }
 
@@ -401,7 +483,7 @@ export function canAccessNote(
   }
 
   if (action === 'READ' && note.project_id) {
-    const state = db.getState();
+    const state = getRuntimeDb().getState();
     const proj = state.projects.find(p => p.id === note.project_id);
     if (proj && canAccessProject(user, proj, 'READ').allowed) {
       return { allowed: true };
@@ -433,7 +515,7 @@ export function authorizeProject(
   action: ObjectAction = 'READ'
 ): Project | null {
   const user = getCurrentUser(req);
-  const state = db.getState();
+  const state = getRuntimeDb().getState();
   const project = state.projects.find(p => p.id === projectId);
 
   if (!project) {
@@ -443,7 +525,7 @@ export function authorizeProject(
 
   const result = canAccessProject(user, project, action);
   if (!result.allowed) {
-    db.logAudit(
+    getRuntimeDb().logAudit(
       user.id,
       'VERIFY',
       'SECURITY_BOLA',
@@ -461,7 +543,7 @@ export function authorizeProject(
   }
 
   if (result.isAdminOverride) {
-    db.logAudit(
+    getRuntimeDb().logAudit(
       user.id,
       'VERIFY',
       'ADMIN_OVERRIDE',
@@ -483,7 +565,7 @@ export function authorizeDataset(
   action: ObjectAction = 'READ'
 ): Dataset | null {
   const user = getCurrentUser(req);
-  const state = db.getState();
+  const state = getRuntimeDb().getState();
   const dataset = state.datasets.find(d => d.id === datasetId);
 
   if (!dataset) {
@@ -493,7 +575,7 @@ export function authorizeDataset(
 
   const result = canAccessDataset(user, dataset, action);
   if (!result.allowed) {
-    db.logAudit(
+    getRuntimeDb().logAudit(
       user.id,
       'VERIFY',
       'SECURITY_BOLA',
@@ -511,7 +593,7 @@ export function authorizeDataset(
   }
 
   if (result.isAdminOverride) {
-    db.logAudit(
+    getRuntimeDb().logAudit(
       user.id,
       'VERIFY',
       'ADMIN_OVERRIDE',
@@ -533,7 +615,7 @@ export function authorizeNotebook(
   action: ObjectAction = 'READ'
 ): NutriNotebook | null {
   const user = getCurrentUser(req);
-  const state = db.getState();
+  const state = getRuntimeDb().getState();
   const notebook = state.notebooks.find(nb => nb.id === notebookId);
 
   if (!notebook) {
@@ -543,7 +625,7 @@ export function authorizeNotebook(
 
   const result = canAccessNotebook(user, notebook, action);
   if (!result.allowed) {
-    db.logAudit(
+    getRuntimeDb().logAudit(
       user.id,
       'VERIFY',
       'SECURITY_BOLA',
@@ -561,7 +643,7 @@ export function authorizeNotebook(
   }
 
   if (result.isAdminOverride) {
-    db.logAudit(
+    getRuntimeDb().logAudit(
       user.id,
       'VERIFY',
       'ADMIN_OVERRIDE',
@@ -583,7 +665,7 @@ export function authorizeNotebookCell(
   action: ObjectAction = 'READ'
 ): NotebookCell | null {
   const user = getCurrentUser(req);
-  const state = db.getState();
+  const state = getRuntimeDb().getState();
   const cell = state.notebook_cells.find(c => c.id === cellId);
 
   if (!cell) {
@@ -593,7 +675,7 @@ export function authorizeNotebookCell(
 
   const result = canAccessNotebookCell(user, cell, action);
   if (!result.allowed) {
-    db.logAudit(
+    getRuntimeDb().logAudit(
       user.id,
       'VERIFY',
       'SECURITY_BOLA',
@@ -611,7 +693,7 @@ export function authorizeNotebookCell(
   }
 
   if (result.isAdminOverride) {
-    db.logAudit(
+    getRuntimeDb().logAudit(
       user.id,
       'VERIFY',
       'ADMIN_OVERRIDE',
@@ -633,7 +715,7 @@ export function authorizeMaterial(
   action: ObjectAction = 'READ'
 ): Material | null {
   const user = getCurrentUser(req);
-  const state = db.getState();
+  const state = getRuntimeDb().getState();
   const material = state.materials.find(m => m.id === materialId);
 
   if (!material) {
@@ -643,7 +725,7 @@ export function authorizeMaterial(
 
   const result = canAccessMaterial(user, material, action);
   if (!result.allowed) {
-    db.logAudit(
+    getRuntimeDb().logAudit(
       user.id,
       'VERIFY',
       'SECURITY_BOLA',
@@ -661,7 +743,7 @@ export function authorizeMaterial(
   }
 
   if (result.isAdminOverride) {
-    db.logAudit(
+    getRuntimeDb().logAudit(
       user.id,
       'VERIFY',
       'ADMIN_OVERRIDE',
@@ -683,7 +765,7 @@ export function authorizeExperiment(
   action: ObjectAction = 'READ'
 ): Experiment | null {
   const user = getCurrentUser(req);
-  const state = db.getState();
+  const state = getRuntimeDb().getState();
   const experiment = state.experiments.find(e => e.id === experimentId);
 
   if (!experiment) {
@@ -693,7 +775,7 @@ export function authorizeExperiment(
 
   const result = canAccessExperiment(user, experiment, action);
   if (!result.allowed) {
-    db.logAudit(
+    getRuntimeDb().logAudit(
       user.id,
       'VERIFY',
       'SECURITY_BOLA',
@@ -711,7 +793,7 @@ export function authorizeExperiment(
   }
 
   if (result.isAdminOverride) {
-    db.logAudit(
+    getRuntimeDb().logAudit(
       user.id,
       'VERIFY',
       'ADMIN_OVERRIDE',
@@ -733,7 +815,7 @@ export function authorizeTeam(
   action: ObjectAction = 'READ'
 ): Team | null {
   const user = getCurrentUser(req);
-  const state = db.getState();
+  const state = getRuntimeDb().getState();
   const team = state.teams.find(t => t.id === teamId);
 
   if (!team) {
@@ -743,7 +825,7 @@ export function authorizeTeam(
 
   const result = canAccessTeam(user, team, action);
   if (!result.allowed) {
-    db.logAudit(
+    getRuntimeDb().logAudit(
       user.id,
       'VERIFY',
       'SECURITY_BOLA',
@@ -773,7 +855,7 @@ export function authorizeNote(
   action: ObjectAction = 'READ'
 ): Note | null {
   const user = getCurrentUser(req);
-  const state = db.getState();
+  const state = getRuntimeDb().getState();
   const note = state.notes.find(n => n.id === noteId);
 
   if (!note) {
@@ -783,7 +865,7 @@ export function authorizeNote(
 
   const result = canAccessNote(user, note, action);
   if (!result.allowed) {
-    db.logAudit(
+    getRuntimeDb().logAudit(
       user.id,
       'VERIFY',
       'SECURITY_BOLA',
@@ -850,7 +932,7 @@ export function authorizeRoleRequest(
   action: ObjectAction = 'READ'
 ): RoleRequest | null {
   const user = getCurrentUser(req);
-  const state = db.getState();
+  const state = getRuntimeDb().getState();
   const roleRequest = (state.role_requests || []).find(r => r.request_id === requestId);
 
   if (!roleRequest) {
@@ -860,7 +942,7 @@ export function authorizeRoleRequest(
 
   const result = canAccessRoleRequest(user, roleRequest, action);
   if (!result.allowed) {
-    db.logAudit(
+    getRuntimeDb().logAudit(
       user.id,
       'VERIFY',
       'SECURITY_BOLA',
@@ -879,4 +961,3 @@ export function authorizeRoleRequest(
 
   return roleRequest;
 }
-

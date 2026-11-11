@@ -11,9 +11,10 @@
  * 5. Isolated Instances: Avoids shared global singletons; connection pool can be closed cleanly via close().
  */
 
-import { eq, and, desc, sql } from 'drizzle-orm';
+import { eq, and, desc, lt, or, sql } from 'drizzle-orm';
 import { drizzle, NodePgDatabase } from 'drizzle-orm/node-postgres';
 import pg from 'pg';
+import crypto from 'crypto';
 import * as schema from '../schema';
 import {
   IDatabaseRepositories,
@@ -72,10 +73,28 @@ import {
   CalculationTrace,
   InterpretationRule
 } from '../../../scientific';
-import { ISessionStore, MemorySessionStore } from '../../auth/sessionStore';
-import { IOIDCTransactionStore } from '../../auth/oidc/types';
-import { MemoryOIDCTransactionStore } from '../../auth/oidc/transactionStore';
-import { JsonSessionRepository, JsonOIDCTransactionRepository } from './lowdbJsonDatabase';
+import { SessionData, SessionValidationResult } from '../../auth/sessionStore';
+import {
+  OIDCTransaction,
+  OIDCClientTransactionData,
+  CreateTransactionOptions,
+  ConsumeTransactionOptions,
+  ConsumeTransactionResult
+} from '../../auth/oidc/types';
+import {
+  generateCryptographicToken,
+  generateState,
+  hashState,
+  generateNonce,
+  generateCodeVerifier,
+  calculateCodeChallenge,
+  timingSafeEqual,
+  DEFAULT_CODE_VERIFIER_LENGTH
+} from '../../auth/oidc/primitives';
+import {
+  DEFAULT_TRANSACTION_TTL_SECONDS,
+  DEFAULT_CLOCK_SKEW_TOLERANCE_SECONDS
+} from '../../auth/oidc/config';
 
 // Type alias for Drizzle PostgreSQL Database / Transaction client
 export type DrizzlePgExecutor = NodePgDatabase<typeof schema> | any;
@@ -248,6 +267,15 @@ export class PostgresUserRepository extends BasePostgresRepository implements IU
     if (updates.account_status !== undefined) values.accountStatus = updates.account_status;
     if (updates.token_version !== undefined) values.tokenVersion = updates.token_version;
     if (updates.last_login_at !== undefined) values.lastLoginAt = new Date(updates.last_login_at);
+    if (updates.is_main_admin !== undefined) values.isMainAdmin = updates.is_main_admin;
+    if (updates.governance_granted_at !== undefined) {
+      values.governanceGrantedAt = updates.governance_granted_at
+        ? new Date(updates.governance_granted_at)
+        : null;
+    }
+    if (updates.governance_granted_by !== undefined) {
+      values.governanceGrantedBy = updates.governance_granted_by;
+    }
 
     const rows = await this.getExecutor(tx)
       .update(schema.users)
@@ -408,6 +436,11 @@ export class PostgresRoleRequestRepository extends BasePostgresRepository implem
     return rows[0] ? this.mapRoleRequest(rows[0]) : null;
   }
 
+  async listAll(tx?: ITransactionContext): Promise<RoleRequest[]> {
+    const rows = await this.getExecutor(tx).select().from(schema.roleRequests);
+    return rows.map((row: any) => this.mapRoleRequest(row));
+  }
+
   async listPending(tx?: ITransactionContext): Promise<RoleRequest[]> {
     const rows = await this.getExecutor(tx)
       .select()
@@ -444,8 +477,11 @@ export class PostgresRoleRequestRepository extends BasePostgresRepository implem
     status: ApprovalStatus,
     reviewerId: string,
     reviewReason?: string | null,
-    tx?: ITransactionContext
+    tx?: ITransactionContext,
+    expectedStatus?: ApprovalStatus
   ): Promise<RoleRequest> {
+    const conditions = [eq(schema.roleRequests.requestId, requestId)];
+    if (expectedStatus) conditions.push(eq(schema.roleRequests.approvalStatus, expectedStatus));
     const rows = await this.getExecutor(tx)
       .update(schema.roleRequests)
       .set({
@@ -454,10 +490,21 @@ export class PostgresRoleRequestRepository extends BasePostgresRepository implem
         reviewedAt: new Date(),
         reviewReason: reviewReason || null
       })
-      .where(eq(schema.roleRequests.requestId, requestId))
+      .where(and(...conditions))
       .returning();
 
-    if (!rows[0]) throw new Error(`Role request not found: ${requestId}`);
+    if (!rows[0]) {
+      if (expectedStatus) {
+        const current = await this.findById(requestId, tx);
+        if (current) {
+          throw Object.assign(
+            new Error(`Role request is already finalized with status '${current.approval_status}'.`),
+            { statusCode: 409, code: 'ALREADY_FINALIZED', current_status: current.approval_status }
+          );
+        }
+      }
+      throw new Error(`Role request not found: ${requestId}`);
+    }
     return this.mapRoleRequest(rows[0]);
   }
 
@@ -471,8 +518,8 @@ export class PostgresRoleRequestRepository extends BasePostgresRepository implem
       justification: row.justification,
       created_at: row.createdAt?.toISOString(),
       reviewed_by: row.reviewedBy,
-      reviewed_at: row.reviewedAt?.toISOString(),
-      review_reason: row.reviewReason
+      reviewed_at: row.reviewedAt?.toISOString() ?? null,
+      review_reason: row.reviewReason ?? null
     };
   }
 }
@@ -489,6 +536,11 @@ export class PostgresProjectRepository extends BasePostgresRepository implements
       .where(eq(schema.projects.id, id))
       .limit(1);
     return rows[0] ? this.mapProject(rows[0]) : null;
+  }
+
+  async listAll(tx?: ITransactionContext): Promise<Project[]> {
+    const rows = await this.getExecutor(tx).select().from(schema.projects);
+    return rows.map((row: any) => this.mapProject(row));
   }
 
   async listPublic(tx?: ITransactionContext): Promise<Project[]> {
@@ -544,6 +596,7 @@ export class PostgresProjectRepository extends BasePostgresRepository implements
     const values: any = { updatedAt: new Date() };
     if (updates.name !== undefined) values.name = updates.name;
     if (updates.description !== undefined) values.description = updates.description;
+    if (updates.type !== undefined) values.type = updates.type;
     if (updates.is_public !== undefined) values.isPublic = updates.is_public;
     if (updates.tags !== undefined) values.tags = updates.tags;
 
@@ -582,6 +635,34 @@ export class PostgresProjectRepository extends BasePostgresRepository implements
 }
 
 export class PostgresMembershipRepository extends BasePostgresRepository implements IMembershipRepository {
+  async getTeams(tx?: ITransactionContext): Promise<Team[]> {
+    const rows = await this.getExecutor(tx).select().from(schema.teams);
+    return rows.map((row: any) => ({
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      owner_id: row.ownerId,
+      created_at: row.createdAt?.toISOString()
+    }));
+  }
+
+  async createTeam(team: Team, tx?: ITransactionContext): Promise<Team> {
+    const rows = await this.getExecutor(tx).insert(schema.teams).values({
+      id: team.id,
+      name: team.name,
+      description: team.description || null,
+      ownerId: team.owner_id,
+      createdAt: team.created_at ? new Date(team.created_at) : new Date()
+    }).returning();
+    return {
+      id: rows[0].id,
+      name: rows[0].name,
+      description: rows[0].description,
+      owner_id: rows[0].ownerId,
+      created_at: rows[0].createdAt?.toISOString()
+    };
+  }
+
   async getProjectMembers(projectId: string, tx?: ITransactionContext): Promise<ProjectMember[]> {
     const rows = await this.getExecutor(tx)
       .select()
@@ -608,6 +689,10 @@ export class PostgresMembershipRepository extends BasePostgresRepository impleme
     const inserted = await this.getExecutor(tx)
       .insert(schema.projectMembers)
       .values(values)
+      .onConflictDoUpdate({
+        target: [schema.projectMembers.projectId, schema.projectMembers.userId],
+        set: { role: values.role }
+      })
       .returning();
 
     return {
@@ -671,7 +756,14 @@ export class PostgresMembershipRepository extends BasePostgresRepository impleme
       role: member.role,
       joinedAt: member.joined_at ? new Date(member.joined_at) : new Date()
     };
-    const res = await this.getExecutor(tx).insert(schema.teamMembers).values(values).returning();
+    const res = await this.getExecutor(tx)
+      .insert(schema.teamMembers)
+      .values(values)
+      .onConflictDoUpdate({
+        target: [schema.teamMembers.teamId, schema.teamMembers.userId],
+        set: { role: values.role }
+      })
+      .returning();
     return {
       id: res[0].id,
       team_id: res[0].teamId,
@@ -706,7 +798,7 @@ export class PostgresMaterialRepository extends BasePostgresRepository implement
       .from(schema.materials)
       .where(eq(schema.materials.id, id))
       .limit(1);
-    return rows[0] ? this.mapMaterial(rows[0]) : null;
+    return rows[0] ? this.mapMaterial(rows[0], tx) : null;
   }
 
   async findByFilePath(filePath: string, tx?: ITransactionContext): Promise<Material | null> {
@@ -715,12 +807,13 @@ export class PostgresMaterialRepository extends BasePostgresRepository implement
       .from(schema.materials)
       .where(eq(schema.materials.filePath, filePath))
       .limit(1);
-    return rows[0] ? this.mapMaterial(rows[0]) : null;
+    return rows[0] ? this.mapMaterial(rows[0], tx) : null;
   }
 
   async listAll(tx?: ITransactionContext): Promise<Material[]> {
     const rows = await this.getExecutor(tx).select().from(schema.materials);
-    return rows.map((r: any) => this.mapMaterial(r));
+    const materials = await Promise.all(rows.map((r: any) => this.mapMaterial(r, tx)));
+    return materials;
   }
 
   async listByProject(projectId: string, tx?: ITransactionContext): Promise<Material[]> {
@@ -759,7 +852,13 @@ export class PostgresMaterialRepository extends BasePostgresRepository implement
     };
 
     const inserted = await this.getExecutor(tx).insert(schema.materials).values(values).returning();
-    return this.mapMaterial(inserted[0]);
+    for (const projectId of material.project_ids || []) {
+      await this.getExecutor(tx).insert(schema.materialProjects).values({
+        materialId: material.id,
+        projectId
+      }).onConflictDoNothing();
+    }
+    return this.mapMaterial(inserted[0], tx);
   }
 
   async update(id: string, updates: Partial<Material>, tx?: ITransactionContext): Promise<Material> {
@@ -774,7 +873,17 @@ export class PostgresMaterialRepository extends BasePostgresRepository implement
       .returning();
 
     if (!rows[0]) throw new Error(`Material not found: ${id}`);
-    return this.mapMaterial(rows[0]);
+    return this.mapMaterial(rows[0], tx);
+  }
+
+  async linkToProject(materialId: string, projectId: string, tx?: ITransactionContext): Promise<Material | null> {
+    const rows = await this.getExecutor(tx).select().from(schema.materials)
+      .where(eq(schema.materials.id, materialId)).limit(1);
+    if (!rows[0]) return null;
+    await this.getExecutor(tx).insert(schema.materialProjects).values({ materialId, projectId }).onConflictDoNothing();
+    await this.getExecutor(tx).update(schema.materials).set({ updatedAt: new Date() })
+      .where(eq(schema.materials.id, materialId));
+    return this.findById(materialId, tx);
   }
 
   async delete(id: string, tx?: ITransactionContext): Promise<boolean> {
@@ -882,6 +991,18 @@ export class PostgresMaterialRepository extends BasePostgresRepository implement
     }));
   }
 
+  async getAllBookmarks(materialId?: string, tx?: ITransactionContext): Promise<Bookmark[]> {
+    const rows = await this.getExecutor(tx).select().from(schema.bookmarks);
+    return rows.filter((row: any) => !materialId || row.materialId === materialId).map((r: any) => ({
+      id: r.id,
+      user_id: r.userId,
+      material_id: r.materialId,
+      page: r.page,
+      title: r.title,
+      created_at: r.createdAt?.toISOString()
+    }));
+  }
+
   async saveBookmark(bookmark: Bookmark, tx?: ITransactionContext): Promise<Bookmark> {
     const values: any = {
       id: bookmark.id || `bm_${Date.now()}`,
@@ -920,6 +1041,19 @@ export class PostgresMaterialRepository extends BasePostgresRepository implement
       .where(and(...conditions));
 
     return rows.map((r: any) => ({
+      id: r.id,
+      user_id: r.userId,
+      material_id: r.materialId,
+      page: r.page,
+      selected_text: r.selectedText,
+      color: r.color,
+      created_at: r.createdAt?.toISOString()
+    }));
+  }
+
+  async getAllHighlights(materialId?: string, tx?: ITransactionContext): Promise<Highlight[]> {
+    const rows = await this.getExecutor(tx).select().from(schema.highlights);
+    return rows.filter((row: any) => !materialId || row.materialId === materialId).map((r: any) => ({
       id: r.id,
       user_id: r.userId,
       material_id: r.materialId,
@@ -980,6 +1114,22 @@ export class PostgresMaterialRepository extends BasePostgresRepository implement
     }));
   }
 
+  async getAllNotes(tx?: ITransactionContext): Promise<Note[]> {
+    const rows = await this.getExecutor(tx).select().from(schema.notes);
+    return rows.map((r: any) => ({
+      id: r.id,
+      user_id: r.userId,
+      title: r.title,
+      content: r.content,
+      material_id: r.materialId,
+      page: r.page,
+      selected_text: r.selectedText,
+      project_id: r.projectId,
+      created_at: r.createdAt?.toISOString(),
+      updated_at: r.updatedAt?.toISOString()
+    }));
+  }
+
   async saveNote(note: Note, tx?: ITransactionContext): Promise<Note> {
     const values: any = {
       id: note.id || `note_${Date.now()}`,
@@ -993,7 +1143,19 @@ export class PostgresMaterialRepository extends BasePostgresRepository implement
       createdAt: note.created_at ? new Date(note.created_at) : new Date(),
       updatedAt: note.updated_at ? new Date(note.updated_at) : new Date()
     };
-    const res = await this.getExecutor(tx).insert(schema.notes).values(values).returning();
+    const res = await this.getExecutor(tx).insert(schema.notes).values(values)
+      .onConflictDoUpdate({
+        target: schema.notes.id,
+        set: {
+          title: values.title,
+          content: values.content,
+          materialId: values.materialId,
+          page: values.page,
+          selectedText: values.selectedText,
+          projectId: values.projectId,
+          updatedAt: values.updatedAt
+        }
+      }).returning();
     return {
       id: res[0].id,
       user_id: res[0].userId,
@@ -1013,7 +1175,11 @@ export class PostgresMaterialRepository extends BasePostgresRepository implement
     return res.length > 0;
   }
 
-  private mapMaterial(row: any): Material {
+  private async mapMaterial(row: any, tx?: ITransactionContext): Promise<Material> {
+    const projectRows = await this.getExecutor(tx)
+      .select({ projectId: schema.materialProjects.projectId })
+      .from(schema.materialProjects)
+      .where(eq(schema.materialProjects.materialId, row.id));
     return {
       id: row.id,
       title: row.title,
@@ -1033,7 +1199,7 @@ export class PostgresMaterialRepository extends BasePostgresRepository implement
       file_size_bytes: row.fileSizeBytes,
       mime_type: row.mimeType,
       file_hash: row.fileHash,
-      project_ids: [],
+      project_ids: projectRows.map((project: any) => project.projectId),
       created_at: row.createdAt?.toISOString(),
       updated_at: row.updatedAt?.toISOString()
     };
@@ -1052,6 +1218,11 @@ export class PostgresDatasetRepository extends BasePostgresRepository implements
       .where(eq(schema.datasets.id, id))
       .limit(1);
     return rows[0] ? this.mapDataset(rows[0]) : null;
+  }
+
+  async listAll(tx?: ITransactionContext): Promise<Dataset[]> {
+    const rows = await this.getExecutor(tx).select().from(schema.datasets);
+    return rows.map((row: any) => this.mapDataset(row));
   }
 
   async listByProject(projectId: string, tx?: ITransactionContext): Promise<Dataset[]> {
@@ -1083,6 +1254,7 @@ export class PostgresDatasetRepository extends BasePostgresRepository implements
     const values: any = { updatedAt: new Date() };
     if (updates.name !== undefined) values.name = updates.name;
     if (updates.description !== undefined) values.description = updates.description;
+    if (updates.current_version !== undefined) values.currentVersion = updates.current_version;
 
     const rows = await this.getExecutor(tx)
       .update(schema.datasets)
@@ -1178,6 +1350,82 @@ export class PostgresDatasetRepository extends BasePostgresRepository implements
 // ============================================================================
 
 export class PostgresScientificRegistryRepository extends BasePostgresRepository implements IScientificRegistryRepository {
+  private async mapFormula(row: any, tx?: ITransactionContext): Promise<ScientificFormula> {
+    const executor = this.getExecutor(tx);
+    const [parameterRows, referenceRows] = await Promise.all([
+      executor.select({ parameterId: schema.scientificFormulaParameters.parameterId })
+        .from(schema.scientificFormulaParameters)
+        .where(eq(schema.scientificFormulaParameters.formulaId, row.formulaId)),
+      executor.select({ referenceId: schema.scientificFormulaReferences.referenceId })
+        .from(schema.scientificFormulaReferences)
+        .where(eq(schema.scientificFormulaReferences.formulaId, row.formulaId))
+    ]);
+    return {
+      formula_id: row.formulaId,
+      module_id: row.moduleId,
+      module_type: row.moduleType,
+      name: row.name,
+      description: row.description,
+      version: row.version,
+      status: row.status,
+      inputs: row.inputs || [],
+      outputs: row.outputs || [],
+      parameter_ids: parameterRows.map((entry: any) => entry.parameterId),
+      expression_ast: row.expressionAst,
+      expression_string: row.expressionString,
+      reference_ids: referenceRows.map((entry: any) => entry.referenceId),
+      assumptions: row.assumptions || [],
+      limitations: row.limitations || [],
+      validation_status: row.validationStatus,
+      created_by: row.createdBy,
+      created_at: row.createdAt?.toISOString(),
+      updated_at: row.updatedAt?.toISOString()
+    };
+  }
+
+  private async mapModel(row: any, tx?: ITransactionContext): Promise<ScientificModel> {
+    const executor = this.getExecutor(tx);
+    const [variableRows, formulaRows, algorithmRows, parameterRows, referenceRows] = await Promise.all([
+      executor.select({ variableId: schema.scientificModelVariables.variableId })
+        .from(schema.scientificModelVariables)
+        .where(eq(schema.scientificModelVariables.modelId, row.modelId)),
+      executor.select({ formulaId: schema.scientificModelFormulas.formulaId })
+        .from(schema.scientificModelFormulas)
+        .where(eq(schema.scientificModelFormulas.modelId, row.modelId)),
+      executor.select({ algorithmId: schema.scientificModelAlgorithms.algorithmId })
+        .from(schema.scientificModelAlgorithms)
+        .where(eq(schema.scientificModelAlgorithms.modelId, row.modelId)),
+      executor.select({ parameterId: schema.scientificModelParameters.parameterId })
+        .from(schema.scientificModelParameters)
+        .where(eq(schema.scientificModelParameters.modelId, row.modelId)),
+      executor.select({ referenceId: schema.scientificModelReferences.referenceId })
+        .from(schema.scientificModelReferences)
+        .where(eq(schema.scientificModelReferences.modelId, row.modelId))
+    ]);
+    return {
+      model_id: row.modelId,
+      module_id: row.moduleId,
+      module_type: row.moduleType,
+      name: row.name,
+      description: row.description,
+      version: row.version,
+      status: row.status,
+      is_verified: row.isVerified,
+      parent_model_id: row.parentModelId,
+      variable_ids: variableRows.map((entry: any) => entry.variableId),
+      formula_ids: formulaRows.map((entry: any) => entry.formulaId),
+      algorithm_ids: algorithmRows.map((entry: any) => entry.algorithmId),
+      parameter_ids: parameterRows.map((entry: any) => entry.parameterId),
+      reference_ids: referenceRows.map((entry: any) => entry.referenceId),
+      assumptions: row.assumptions || [],
+      validation_criteria: row.validationCriteria,
+      changed_notes: row.changedNotes,
+      created_by: row.createdBy,
+      created_at: row.createdAt?.toISOString(),
+      updated_at: row.updatedAt?.toISOString()
+    };
+  }
+
   async getUnits(tx?: ITransactionContext): Promise<ScientificUnit[]> {
     const rows = await this.getExecutor(tx).select().from(schema.scientificUnits);
     return rows.map((r: any) => ({
@@ -1232,6 +1480,26 @@ export class PostgresScientificRegistryRepository extends BasePostgresRepository
     }));
   }
 
+  async createVariable(variable: ScientificVariable, tx?: ITransactionContext): Promise<ScientificVariable> {
+    await this.getExecutor(tx).insert(schema.scientificVariables).values({
+      variableId: variable.variable_id,
+      name: variable.name,
+      label: variable.label,
+      definition: variable.definition || null,
+      datatype: variable.datatype,
+      unit: variable.unit,
+      measurementType: variable.measurement_type,
+      allowedRange: variable.allowed_range,
+      population: variable.population || null,
+      sourceReference: variable.source_reference || null,
+      version: variable.version || '1.0.0',
+      status: variable.status || 'EXPERIMENTAL',
+      createdAt: variable.created_at ? new Date(variable.created_at) : new Date(),
+      updatedAt: variable.updated_at ? new Date(variable.updated_at) : new Date()
+    });
+    return structuredClone(variable);
+  }
+
   async getVariableById(id: string, tx?: ITransactionContext): Promise<ScientificVariable | null> {
     const rows = await this.getExecutor(tx)
       .select()
@@ -1259,6 +1527,23 @@ export class PostgresScientificRegistryRepository extends BasePostgresRepository
     }));
   }
 
+  async createParameter(parameter: ScientificParameter, tx?: ITransactionContext): Promise<ScientificParameter> {
+    await this.getExecutor(tx).insert(schema.scientificParameters).values({
+      parameterId: parameter.parameter_id,
+      name: parameter.name,
+      description: parameter.description || null,
+      value: parameter.value,
+      unit: parameter.unit,
+      validRange: parameter.valid_range,
+      version: parameter.version || '1.0.0',
+      status: parameter.status || 'EXPERIMENTAL',
+      isConstant: Boolean(parameter.is_constant),
+      createdAt: parameter.created_at ? new Date(parameter.created_at) : new Date(),
+      updatedAt: parameter.updated_at ? new Date(parameter.updated_at) : new Date()
+    });
+    return structuredClone(parameter);
+  }
+
   async getParameterById(id: string, tx?: ITransactionContext): Promise<ScientificParameter | null> {
     const rows = await this.getExecutor(tx)
       .select()
@@ -1270,27 +1555,42 @@ export class PostgresScientificRegistryRepository extends BasePostgresRepository
 
   async getFormulas(tx?: ITransactionContext): Promise<ScientificFormula[]> {
     const rows = await this.getExecutor(tx).select().from(schema.scientificFormulas);
-    return rows.map((r: any) => ({
-      formula_id: r.formulaId,
-      module_id: r.moduleId,
-      module_type: r.moduleType,
-      name: r.name,
-      description: r.description,
-      version: r.version,
-      status: r.status,
-      inputs: r.inputs,
-      outputs: r.outputs,
-      parameter_ids: [],
-      expression_ast: r.expressionAst,
-      expression_string: r.expressionString,
-      reference_ids: [],
-      assumptions: r.assumptions,
-      limitations: r.limitations,
-      validation_status: r.validationStatus,
-      created_by: r.createdBy,
-      created_at: r.createdAt?.toISOString(),
-      updated_at: r.updatedAt?.toISOString()
-    }));
+    return Promise.all(rows.map((row: any) => this.mapFormula(row, tx)));
+  }
+
+  async createFormula(formula: ScientificFormula, tx?: ITransactionContext): Promise<ScientificFormula> {
+    await this.getExecutor(tx).insert(schema.scientificFormulas).values({
+      formulaId: formula.formula_id,
+      moduleId: formula.module_id || null,
+      moduleType: formula.module_type || 'FORMULA',
+      name: formula.name,
+      description: formula.description || null,
+      version: formula.version || '1.0.0',
+      status: formula.status || 'EXPERIMENTAL',
+      inputs: formula.inputs || [],
+      outputs: formula.outputs || [],
+      expressionAst: formula.expression_ast,
+      expressionString: formula.expression_string || null,
+      assumptions: formula.assumptions || [],
+      limitations: formula.limitations || [],
+      validationStatus: formula.validation_status || 'UNVERIFIED_EXPERIMENTAL',
+      createdBy: formula.created_by || null,
+      createdAt: formula.created_at ? new Date(formula.created_at) : new Date(),
+      updatedAt: formula.updated_at ? new Date(formula.updated_at) : new Date()
+    });
+    for (const parameterId of formula.parameter_ids || []) {
+      await this.getExecutor(tx).insert(schema.scientificFormulaParameters).values({
+        formulaId: formula.formula_id,
+        parameterId
+      }).onConflictDoNothing();
+    }
+    for (const referenceId of formula.reference_ids || []) {
+      await this.getExecutor(tx).insert(schema.scientificFormulaReferences).values({
+        formulaId: formula.formula_id,
+        referenceId
+      }).onConflictDoNothing();
+    }
+    return structuredClone(formula);
   }
 
   async getFormulaById(id: string, tx?: ITransactionContext): Promise<ScientificFormula | null> {
@@ -1299,30 +1599,46 @@ export class PostgresScientificRegistryRepository extends BasePostgresRepository
       .from(schema.scientificFormulas)
       .where(eq(schema.scientificFormulas.formulaId, id))
       .limit(1);
-    return rows[0] ? (rows[0] as any) : null;
+    return rows[0] ? this.mapFormula(rows[0], tx) : null;
   }
 
   async getModels(tx?: ITransactionContext): Promise<ScientificModel[]> {
     const rows = await this.getExecutor(tx).select().from(schema.scientificModels);
-    return rows.map((r: any) => ({
-      model_id: r.modelId,
-      module_id: r.moduleId,
-      module_type: r.moduleType,
-      name: r.name,
-      description: r.description,
-      version: r.version,
-      status: r.status,
-      is_verified: r.isVerified,
-      variable_ids: [],
-      parameter_ids: [],
-      reference_ids: [],
-      assumptions: r.assumptions,
-      validation_criteria: r.validationCriteria,
-      changed_notes: r.changedNotes,
-      created_by: r.createdBy,
-      created_at: r.createdAt?.toISOString(),
-      updated_at: r.updatedAt?.toISOString()
-    }));
+    return Promise.all(rows.map((row: any) => this.mapModel(row, tx)));
+  }
+
+  async createModel(model: ScientificModel, tx?: ITransactionContext): Promise<ScientificModel> {
+    await this.getExecutor(tx).insert(schema.scientificModels).values({
+      modelId: model.model_id,
+      moduleId: model.module_id || null,
+      moduleType: model.module_type || 'MODEL',
+      name: model.name,
+      description: model.description || null,
+      version: model.version || '1.0.0',
+      status: model.status || 'EXPERIMENTAL',
+      isVerified: Boolean(model.is_verified),
+      parentModelId: model.parent_model_id || null,
+      assumptions: model.assumptions || [],
+      validationCriteria: model.validation_criteria || null,
+      changedNotes: model.changed_notes || null,
+      createdBy: model.created_by || null,
+      createdAt: model.created_at ? new Date(model.created_at) : new Date(),
+      updatedAt: model.updated_at ? new Date(model.updated_at) : new Date()
+    });
+    const relations: Array<[any, string, string[]]> = [
+      [schema.scientificModelVariables, 'variableId', model.variable_ids || []],
+      [schema.scientificModelFormulas, 'formulaId', model.formula_ids || []],
+      [schema.scientificModelAlgorithms, 'algorithmId', model.algorithm_ids || []],
+      [schema.scientificModelParameters, 'parameterId', model.parameter_ids || []],
+      [schema.scientificModelReferences, 'referenceId', model.reference_ids || []]
+    ];
+    for (const [table, column, ids] of relations) {
+      for (const relatedId of ids) {
+        await this.getExecutor(tx).insert(table).values({ modelId: model.model_id, [column]: relatedId })
+          .onConflictDoNothing();
+      }
+    }
+    return structuredClone(model);
   }
 
   async getModelById(id: string, tx?: ITransactionContext): Promise<ScientificModel | null> {
@@ -1331,7 +1647,7 @@ export class PostgresScientificRegistryRepository extends BasePostgresRepository
       .from(schema.scientificModels)
       .where(eq(schema.scientificModels.modelId, id))
       .limit(1);
-    return rows[0] ? (rows[0] as any) : null;
+    return rows[0] ? this.mapModel(rows[0], tx) : null;
   }
 
   async getReferences(tx?: ITransactionContext): Promise<ScientificReference[]> {
@@ -1346,6 +1662,21 @@ export class PostgresScientificRegistryRepository extends BasePostgresRepository
       citation_key: r.citationKey,
       abstract: r.abstract
     }));
+  }
+
+  async createReference(reference: ScientificReference, tx?: ITransactionContext): Promise<ScientificReference> {
+    await this.getExecutor(tx).insert(schema.scientificReferences).values({
+      referenceId: reference.reference_id,
+      title: reference.title,
+      authors: reference.authors || [],
+      year: reference.year,
+      journalOrPublisher: reference.journal_or_publisher || '',
+      doi: reference.doi || null,
+      citationKey: reference.citation_key || null,
+      abstract: reference.abstract || null,
+      createdAt: reference.created_at ? new Date(reference.created_at) : new Date()
+    });
+    return structuredClone(reference);
   }
 
   async getReferenceById(id: string, tx?: ITransactionContext): Promise<ScientificReference | null> {
@@ -1427,6 +1758,139 @@ export class PostgresScientificRegistryRepository extends BasePostgresRepository
 // ============================================================================
 
 export class PostgresResearchArtifactRepository extends BasePostgresRepository implements IResearchArtifactRepository {
+  async getAllAnalyses(tx?: ITransactionContext): Promise<StatisticsAnalysis[]> {
+    const rows = await this.getExecutor(tx).select().from(schema.statisticsAnalyses);
+    return rows.map((r: any) => ({
+      id: r.id,
+      project_id: r.projectId,
+      dataset_version_id: r.datasetVersionId,
+      title: r.title,
+      analysis_type: r.analysisType,
+      target_columns: r.targetColumns,
+      grouping_column: r.groupingColumn,
+      method_justification: r.methodJustification,
+      results: r.results,
+      provenance_hash: r.provenanceHash,
+      created_by: r.createdBy,
+      created_at: r.createdAt?.toISOString()
+    }));
+  }
+
+  async getAllCharts(tx?: ITransactionContext): Promise<ChartRecord[]> {
+    const rows = await this.getExecutor(tx).select().from(schema.charts);
+    return rows.map((r: any) => ({
+      id: r.id,
+      project_id: r.projectId,
+      dataset_version_id: r.datasetVersionId,
+      analysis_id: r.analysisId,
+      title: r.title,
+      chart_type: r.chartType,
+      x_field: r.xField,
+      y_field: r.yField,
+      group_by: r.groupBy,
+      config: r.config,
+      created_by: r.createdBy,
+      created_at: r.createdAt?.toISOString()
+    }));
+  }
+
+  async getAllNotebooks(tx?: ITransactionContext): Promise<NutriNotebook[]> {
+    const rows = await this.getExecutor(tx).select().from(schema.notebooks);
+    return rows.map((r: any) => ({
+      id: r.id,
+      project_id: r.projectId,
+      title: r.title,
+      description: r.description,
+      created_by: r.createdBy,
+      created_at: r.createdAt?.toISOString(),
+      updated_at: r.updatedAt?.toISOString()
+    }));
+  }
+
+  async getAllExperiments(tx?: ITransactionContext): Promise<Experiment[]> {
+    const rows = await this.getExecutor(tx).select().from(schema.experiments);
+    return rows.map((r: any) => ({
+      id: r.id,
+      project_id: r.projectId,
+      title: r.title,
+      description: r.description,
+      baseline_model_id: r.baselineModelId,
+      experimental_model_id: r.experimentalModelId,
+      parameter_modifications: r.parameterModifications,
+      baseline_output: r.baselineOutput,
+      experimental_output: r.experimentalOutput,
+      delta_summary: r.deltaSummary,
+      status: r.status,
+      provenance_hash: r.provenanceHash,
+      created_by: r.createdBy,
+      created_at: r.createdAt?.toISOString(),
+      updated_at: r.updatedAt?.toISOString()
+    }));
+  }
+
+  async getAllCodeExecutions(tx?: ITransactionContext): Promise<CodeExecutionRecord[]> {
+    const rows = await this.getExecutor(tx).select().from(schema.codeExecutions);
+    return rows.map((r: any) => ({
+      id: r.id,
+      project_id: r.projectId,
+      language: r.language,
+      code: r.code,
+      output: r.output,
+      error: r.error,
+      execution_time_ms: r.executionTimeMs,
+      environment_info: r.environmentInfo,
+      executed_by: r.executedBy,
+      created_at: r.createdAt?.toISOString()
+    }));
+  }
+
+  async getAllProvenanceRecords(tx?: ITransactionContext): Promise<ProvenanceRecord[]> {
+    const rows = await this.getExecutor(tx).select().from(schema.provenanceRecords);
+    return rows.map((r: any) => ({
+      id: r.id,
+      project_id: r.projectId,
+      target_entity_type: r.targetEntityType,
+      target_entity_id: r.targetEntityId,
+      user_id: r.userId,
+      dataset_version_id: r.datasetVersionId,
+      model_version: r.modelVersion,
+      parameter_version: r.parameterVersion,
+      environment_specs: r.environmentSpecs,
+      provenance_hash: r.provenanceHash,
+      reproducibility_manifest: r.reproducibilityManifest,
+      created_at: r.createdAt?.toISOString()
+    }));
+  }
+
+  async getNotebookCells(notebookId: string, tx?: ITransactionContext): Promise<NotebookCell[]> {
+    const rows = await this.getExecutor(tx).select().from(schema.notebookCells)
+      .where(eq(schema.notebookCells.notebookId, notebookId));
+    return rows.map((r: any) => ({
+      id: r.id,
+      notebook_id: r.notebookId,
+      cell_type: r.cellType,
+      order: r.orderIndex,
+      title: r.title,
+      content: r.content,
+      metadata: r.metadata || {}
+    }));
+  }
+
+  async findNotebookCellById(cellId: string, tx?: ITransactionContext): Promise<NotebookCell | null> {
+    const rows = await this.getExecutor(tx).select().from(schema.notebookCells)
+      .where(eq(schema.notebookCells.id, cellId)).limit(1);
+    if (!rows[0]) return null;
+    return {
+      id: rows[0].id,
+      notebook_id: rows[0].notebookId,
+      cell_type: rows[0].cellType,
+      order: rows[0].orderIndex,
+      title: rows[0].title,
+      content: rows[0].content,
+      metadata: rows[0].metadata || {}
+    };
+  }
+
   async getAnalysesByProject(projectId: string, tx?: ITransactionContext): Promise<StatisticsAnalysis[]> {
     const rows = await this.getExecutor(tx)
       .select()
@@ -1472,8 +1936,8 @@ export class PostgresResearchArtifactRepository extends BasePostgresRepository i
       createdBy: analysis.created_by,
       createdAt: analysis.created_at ? new Date(analysis.created_at) : new Date()
     };
-    const res = await this.getExecutor(tx).insert(schema.statisticsAnalyses).values(values).returning();
-    return res[0] as any;
+    await this.getExecutor(tx).insert(schema.statisticsAnalyses).values(values).returning();
+    return structuredClone(analysis);
   }
 
   async getChartsByProject(projectId: string, tx?: ITransactionContext): Promise<ChartRecord[]> {
@@ -1566,7 +2030,8 @@ export class PostgresResearchArtifactRepository extends BasePostgresRepository i
         cell_type: c.cellType,
         order: c.orderIndex,
         title: c.title,
-        content: c.content
+        content: c.content,
+        metadata: c.metadata || {}
       }))
     };
   }
@@ -1592,22 +2057,32 @@ export class PostgresResearchArtifactRepository extends BasePostgresRepository i
       cellType: cell.cell_type,
       orderIndex: cell.order,
       title: cell.title || null,
-      content: cell.content
+      content: cell.content,
+      metadata: cell.metadata || {}
     };
-    const res = await this.getExecutor(tx).insert(schema.notebookCells).values(values).returning();
-    return res[0] as any;
+    await this.getExecutor(tx).insert(schema.notebookCells).values(values).returning();
+    return structuredClone(cell);
   }
 
   async updateNotebookCell(cellId: string, updates: Partial<NotebookCell>, tx?: ITransactionContext): Promise<NotebookCell> {
     const values: any = {};
     if (updates.title !== undefined) values.title = updates.title;
     if (updates.content !== undefined) values.content = updates.content;
+    if (updates.metadata !== undefined) values.metadata = updates.metadata;
     const res = await this.getExecutor(tx)
       .update(schema.notebookCells)
       .set(values)
       .where(eq(schema.notebookCells.id, cellId))
       .returning();
-    return res[0] as any;
+    return {
+      id: res[0].id,
+      notebook_id: res[0].notebookId,
+      cell_type: res[0].cellType,
+      order: res[0].orderIndex,
+      title: res[0].title,
+      content: res[0].content,
+      metadata: res[0].metadata || {}
+    };
   }
 
   async deleteNotebookCell(cellId: string, tx?: ITransactionContext): Promise<boolean> {
@@ -1644,7 +2119,25 @@ export class PostgresResearchArtifactRepository extends BasePostgresRepository i
 
   async getExperimentById(id: string, tx?: ITransactionContext): Promise<Experiment | null> {
     const rows = await this.getExecutor(tx).select().from(schema.experiments).where(eq(schema.experiments.id, id)).limit(1);
-    return rows[0] ? (rows[0] as any) : null;
+    if (!rows[0]) return null;
+    const r = rows[0] as any;
+    return {
+      id: r.id,
+      project_id: r.projectId,
+      title: r.title,
+      description: r.description,
+      baseline_model_id: r.baselineModelId,
+      experimental_model_id: r.experimentalModelId,
+      parameter_modifications: r.parameterModifications,
+      baseline_output: r.baselineOutput,
+      experimental_output: r.experimentalOutput,
+      delta_summary: r.deltaSummary,
+      status: r.status,
+      provenance_hash: r.provenanceHash,
+      created_by: r.createdBy,
+      created_at: r.createdAt?.toISOString(),
+      updated_at: r.updatedAt?.toISOString()
+    };
   }
 
   async createExperiment(experiment: Experiment, tx?: ITransactionContext): Promise<Experiment> {
@@ -1665,8 +2158,8 @@ export class PostgresResearchArtifactRepository extends BasePostgresRepository i
       createdAt: experiment.created_at ? new Date(experiment.created_at) : new Date(),
       updatedAt: experiment.updated_at ? new Date(experiment.updated_at) : new Date()
     };
-    const res = await this.getExecutor(tx).insert(schema.experiments).values(values).returning();
-    return res[0] as any;
+    await this.getExecutor(tx).insert(schema.experiments).values(values).returning();
+    return structuredClone(experiment);
   }
 
   async getCodeExecutionsByProject(projectId: string, tx?: ITransactionContext): Promise<CodeExecutionRecord[]> {
@@ -1687,8 +2180,8 @@ export class PostgresResearchArtifactRepository extends BasePostgresRepository i
       executedBy: record.executed_by,
       createdAt: record.created_at ? new Date(record.created_at) : new Date()
     };
-    const res = await this.getExecutor(tx).insert(schema.codeExecutions).values(values).returning();
-    return res[0] as any;
+    await this.getExecutor(tx).insert(schema.codeExecutions).values(values).returning();
+    return structuredClone(record);
   }
 
   async getProvenanceRecords(projectId: string, tx?: ITransactionContext): Promise<ProvenanceRecord[]> {
@@ -1720,12 +2213,42 @@ export class PostgresResearchArtifactRepository extends BasePostgresRepository i
     const rows = projectId
       ? await executor.select().from(schema.scientificCalculations).where(eq(schema.scientificCalculations.projectId, projectId))
       : await executor.select().from(schema.scientificCalculations);
-    return rows as any;
+    return rows.map((r: any) => ({
+      calculation_id: r.calculationId,
+      user_id: r.userId,
+      project_id: r.projectId,
+      formula_or_model_id: r.formulaOrModelId,
+      version: r.version,
+      inputs_received: r.inputsReceived,
+      normalized_inputs: r.normalizedInputs,
+      parameters_resolved: r.parametersResolved,
+      steps: r.steps,
+      final_result: r.finalResult,
+      explanation: r.explanation,
+      provenance_hash: r.provenanceHash,
+      created_at: r.createdAt?.toISOString()
+    }));
   }
 
   async getCalculationById(id: string, tx?: ITransactionContext): Promise<CalculationTrace | null> {
     const rows = await this.getExecutor(tx).select().from(schema.scientificCalculations).where(eq(schema.scientificCalculations.calculationId, id)).limit(1);
-    return rows[0] ? (rows[0] as any) : null;
+    if (!rows[0]) return null;
+    const r = rows[0] as any;
+    return {
+      calculation_id: r.calculationId,
+      user_id: r.userId,
+      project_id: r.projectId,
+      formula_or_model_id: r.formulaOrModelId,
+      version: r.version,
+      inputs_received: r.inputsReceived,
+      normalized_inputs: r.normalizedInputs,
+      parameters_resolved: r.parametersResolved,
+      steps: r.steps,
+      final_result: r.finalResult,
+      explanation: r.explanation,
+      provenance_hash: r.provenanceHash,
+      created_at: r.createdAt?.toISOString()
+    };
   }
 
   async createCalculation(calculation: CalculationTrace, tx?: ITransactionContext): Promise<CalculationTrace> {
@@ -1744,8 +2267,8 @@ export class PostgresResearchArtifactRepository extends BasePostgresRepository i
       provenanceHash: calculation.provenance_hash,
       createdAt: calculation.created_at ? new Date(calculation.created_at) : new Date()
     };
-    const res = await this.getExecutor(tx).insert(schema.scientificCalculations).values(values).returning();
-    return res[0] as any;
+    await this.getExecutor(tx).insert(schema.scientificCalculations).values(values).returning();
+    return structuredClone(calculation);
   }
 }
 
@@ -1826,6 +2349,301 @@ export class PostgresAuditLogRepository extends BasePostgresRepository implement
   }
 }
 
+export class PostgresSessionRepository extends BasePostgresRepository implements ISessionRepository {
+  async createSession(
+    userId: string,
+    ttlSeconds = 86400,
+    tokenVersion = 1,
+    tx?: ITransactionContext
+  ): Promise<{ token: string; expiresAt: number; session: Omit<SessionData, 'tokenHash'> }> {
+    if (!userId || typeof userId !== 'string') {
+      throw new Error('Valid userId is required to create a session');
+    }
+
+    const now = Date.now();
+    const expiresAt = now + ttlSeconds * 1000;
+    const token = crypto.randomBytes(32).toString('hex');
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+
+    await this.getExecutor(tx).insert(schema.runtimeSessions).values({
+      tokenHash,
+      userId,
+      tokenVersion,
+      createdAt: new Date(now),
+      expiresAt: new Date(expiresAt),
+      revoked: false
+    });
+
+    return {
+      token,
+      expiresAt,
+      session: {
+        userId,
+        createdAt: now,
+        expiresAt,
+        revoked: false,
+        tokenVersion
+      }
+    };
+  }
+
+  async validateSession(token: string): Promise<SessionValidationResult> {
+    if (!token || typeof token !== 'string') {
+      return { valid: false, error: 'Token is missing or not a string' };
+    }
+
+    const normalized = token.trim();
+    if (!/^[a-f0-9]{64}$/i.test(normalized)) {
+      return { valid: false, error: 'Malformed session token format' };
+    }
+
+    const tokenHash = crypto.createHash('sha256').update(normalized).digest('hex');
+    const rows = await this.db
+      .select()
+      .from(schema.runtimeSessions)
+      .where(eq(schema.runtimeSessions.tokenHash, tokenHash))
+      .limit(1);
+    const session = rows[0];
+
+    if (!session) return { valid: false, error: 'Session not found' };
+    if (session.revoked) return { valid: false, error: 'Session has been revoked' };
+    if (Date.now() > session.expiresAt.getTime()) {
+      return { valid: false, error: 'Session has expired' };
+    }
+
+    return {
+      valid: true,
+      userId: session.userId,
+      expiresAt: session.expiresAt.getTime(),
+      tokenVersion: session.tokenVersion
+    };
+  }
+
+  async revokeSession(token: string, tx?: ITransactionContext): Promise<boolean> {
+    if (!token || typeof token !== 'string') return false;
+    const normalized = token.trim();
+    if (!/^[a-f0-9]{64}$/i.test(normalized)) return false;
+    const tokenHash = crypto.createHash('sha256').update(normalized).digest('hex');
+    const rows = await this.getExecutor(tx)
+      .update(schema.runtimeSessions)
+      .set({ revoked: true })
+      .where(and(eq(schema.runtimeSessions.tokenHash, tokenHash), eq(schema.runtimeSessions.revoked, false)))
+      .returning({ tokenHash: schema.runtimeSessions.tokenHash });
+    return rows.length > 0;
+  }
+
+  async revokeSessionsForUser(userId: string, tx?: ITransactionContext): Promise<number> {
+    const rows = await this.getExecutor(tx)
+      .update(schema.runtimeSessions)
+      .set({ revoked: true })
+      .where(and(eq(schema.runtimeSessions.userId, userId), eq(schema.runtimeSessions.revoked, false)))
+      .returning({ tokenHash: schema.runtimeSessions.tokenHash });
+    return rows.length;
+  }
+
+  async cleanExpiredSessions(now = Date.now(), tx?: ITransactionContext): Promise<number> {
+    const rows = await this.getExecutor(tx)
+      .delete(schema.runtimeSessions)
+      .where(or(eq(schema.runtimeSessions.revoked, true), lt(schema.runtimeSessions.expiresAt, new Date(now))))
+      .returning({ tokenHash: schema.runtimeSessions.tokenHash });
+    return rows.length;
+  }
+
+  async getActiveSessionsCount(): Promise<number> {
+    const result = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(schema.runtimeSessions)
+      .where(and(
+        eq(schema.runtimeSessions.revoked, false),
+        sql`${schema.runtimeSessions.expiresAt} >= now()`
+      ));
+    return result[0]?.count ?? 0;
+  }
+}
+
+export class PostgresOIDCTransactionRepository extends BasePostgresRepository implements IOIDCTransactionRepository {
+  private readonly clockSkewToleranceMs = DEFAULT_CLOCK_SKEW_TOLERANCE_SECONDS * 1000;
+
+  private mapTransaction(row: typeof schema.oidcTransactions.$inferSelect): OIDCTransaction {
+    return {
+      id: row.id,
+      state: row.state,
+      stateHash: row.stateHash,
+      nonce: row.nonce,
+      codeVerifier: row.codeVerifier,
+      codeChallenge: row.codeChallenge,
+      codeChallengeMethod: 'S256',
+      createdAt: row.createdAt.getTime(),
+      expiresAt: row.expiresAt.getTime(),
+      consumed: row.consumed,
+      consumedAt: row.consumedAt?.getTime(),
+      clientBinding: row.clientBinding ?? undefined,
+      returnUrl: row.returnUrl ?? undefined,
+      redirectUri: row.redirectUri ?? undefined,
+      purpose: row.purpose as OIDCTransaction['purpose'],
+      targetUserId: row.targetUserId ?? undefined
+    };
+  }
+
+  async createTransaction(
+    options?: CreateTransactionOptions,
+    tx?: ITransactionContext
+  ): Promise<{ transaction: OIDCTransaction; clientData: OIDCClientTransactionData }> {
+    const now = options?.currentTime ?? Date.now();
+    const ttlSeconds = options?.ttlSeconds && options.ttlSeconds > 0
+      ? options.ttlSeconds
+      : DEFAULT_TRANSACTION_TTL_SECONDS;
+    const id = generateCryptographicToken(32);
+    const state = generateState(32);
+    const stateHash = hashState(state);
+    const nonce = generateNonce(32);
+    const codeVerifier = generateCodeVerifier(options?.verifierLength ?? DEFAULT_CODE_VERIFIER_LENGTH);
+    const codeChallenge = calculateCodeChallenge(codeVerifier, 'S256');
+    const expiresAt = now + ttlSeconds * 1000;
+
+    const rows = await this.getExecutor(tx)
+      .insert(schema.oidcTransactions)
+      .values({
+        id,
+        stateHash,
+        state,
+        nonce,
+        codeVerifier,
+        codeChallenge,
+        codeChallengeMethod: 'S256',
+        purpose: options?.purpose ?? 'login',
+        targetUserId: options?.targetUserId,
+        createdAt: new Date(now),
+        expiresAt: new Date(expiresAt),
+        consumed: false,
+        clientBinding: options?.clientBinding,
+        returnUrl: options?.returnUrl,
+        redirectUri: options?.redirectUri
+      })
+      .returning();
+
+    const transaction = this.mapTransaction(rows[0]);
+    return {
+      transaction,
+      clientData: {
+        transactionId: id,
+        state,
+        codeChallenge,
+        codeChallengeMethod: 'S256',
+        expiresAt
+      }
+    };
+  }
+
+  async getTransaction(id: string, tx?: ITransactionContext): Promise<OIDCTransaction | null> {
+    const rows = await this.getExecutor(tx)
+      .select()
+      .from(schema.oidcTransactions)
+      .where(eq(schema.oidcTransactions.id, id))
+      .limit(1);
+    return rows[0] ? this.mapTransaction(rows[0]) : null;
+  }
+
+  async getTransactionByState(state: string, tx?: ITransactionContext): Promise<OIDCTransaction | null> {
+    if (!state || typeof state !== 'string') return null;
+    const rows = await this.getExecutor(tx)
+      .select()
+      .from(schema.oidcTransactions)
+      .where(eq(schema.oidcTransactions.stateHash, hashState(state)))
+      .limit(1);
+    if (!rows[0]) return null;
+    const transaction = this.mapTransaction(rows[0]);
+    return timingSafeEqual(transaction.state, state) ? transaction : null;
+  }
+
+  async consumeTransaction(
+    options: ConsumeTransactionOptions,
+    tx?: ITransactionContext
+  ): Promise<ConsumeTransactionResult> {
+    if (!options || typeof options !== 'object') {
+      return { success: false, error: 'Invalid consumption options provided', code: 'INVALID_ARGUMENT' };
+    }
+    if (!options.state || typeof options.state !== 'string') {
+      return { success: false, error: 'State parameter is missing or invalid', code: 'INVALID_STATE' };
+    }
+
+    const transaction = options.transactionId
+      ? await this.getTransaction(options.transactionId, tx)
+      : await this.getTransactionByState(options.state, tx);
+    if (!transaction) {
+      return { success: false, error: 'Transaction not found or invalid state', code: 'TRANSACTION_NOT_FOUND' };
+    }
+    if (transaction.consumed) {
+      return {
+        success: false,
+        error: 'Transaction has already been consumed. Replay attempt rejected.',
+        code: 'TRANSACTION_ALREADY_CONSUMED'
+      };
+    }
+
+    const now = options.currentTime ?? Date.now();
+    if (now > transaction.expiresAt + this.clockSkewToleranceMs) {
+      return { success: false, error: 'Transaction has expired', code: 'TRANSACTION_EXPIRED' };
+    }
+    if (!timingSafeEqual(transaction.state, options.state)) {
+      return { success: false, error: 'State mismatch', code: 'INVALID_STATE' };
+    }
+    if (options.nonce !== undefined && !timingSafeEqual(transaction.nonce, options.nonce)) {
+      return {
+        success: false,
+        error: 'Nonce mismatch between callback and transaction',
+        code: 'NONCE_MISMATCH'
+      };
+    }
+    if (transaction.clientBinding !== undefined &&
+      (!options.clientBinding || !timingSafeEqual(transaction.clientBinding, options.clientBinding))) {
+      return { success: false, error: 'Client browser binding mismatch', code: 'CLIENT_BINDING_MISMATCH' };
+    }
+
+    const consumedRows = await this.getExecutor(tx)
+      .update(schema.oidcTransactions)
+      .set({ consumed: true, consumedAt: new Date(now) })
+      .where(and(
+        eq(schema.oidcTransactions.id, transaction.id),
+        eq(schema.oidcTransactions.consumed, false),
+        sql`${schema.oidcTransactions.expiresAt} >= ${new Date(now - this.clockSkewToleranceMs)}`
+      ))
+      .returning();
+    if (!consumedRows[0]) {
+      const current = await this.getTransaction(transaction.id, tx);
+      if (!current) {
+        return { success: false, error: 'Transaction not found or invalid state', code: 'TRANSACTION_NOT_FOUND' };
+      }
+      if (!current.consumed && now > current.expiresAt + this.clockSkewToleranceMs) {
+        return { success: false, error: 'Transaction has expired', code: 'TRANSACTION_EXPIRED' };
+      }
+      return {
+        success: false,
+        error: 'Transaction has already been consumed. Replay attempt rejected.',
+        code: 'TRANSACTION_ALREADY_CONSUMED'
+      };
+    }
+
+    return { success: true, transaction: this.mapTransaction(consumedRows[0]) };
+  }
+
+  async deleteTransaction(id: string, tx?: ITransactionContext): Promise<boolean> {
+    const rows = await this.getExecutor(tx)
+      .delete(schema.oidcTransactions)
+      .where(eq(schema.oidcTransactions.id, id))
+      .returning({ id: schema.oidcTransactions.id });
+    return rows.length > 0;
+  }
+
+  async cleanExpiredTransactions(now = Date.now(), tx?: ITransactionContext): Promise<number> {
+    const rows = await this.getExecutor(tx)
+      .delete(schema.oidcTransactions)
+      .where(lt(schema.oidcTransactions.expiresAt, new Date(now - this.clockSkewToleranceMs)))
+      .returning({ id: schema.oidcTransactions.id });
+    return rows.length;
+  }
+}
+
 // ============================================================================
 // 10. PostgreSQL Composition Root / Database Repositories
 // ============================================================================
@@ -1847,9 +2665,7 @@ export class PostgresDatabaseRepositories implements IDatabaseRepositories {
 
   constructor(
     private readonly db: NodePgDatabase<typeof schema>,
-    private readonly pool?: pg.Pool,
-    sessionStore: ISessionStore = new MemorySessionStore(),
-    oidcStore: IOIDCTransactionStore = new MemoryOIDCTransactionStore()
+    private readonly pool?: pg.Pool
   ) {
     this.users = new PostgresUserRepository(this.db);
     this.externalIdentities = new PostgresExternalIdentityRepository(this.db);
@@ -1861,8 +2677,8 @@ export class PostgresDatabaseRepositories implements IDatabaseRepositories {
     this.scientificRegistry = new PostgresScientificRegistryRepository(this.db);
     this.researchArtifacts = new PostgresResearchArtifactRepository(this.db);
     this.auditLogs = new PostgresAuditLogRepository(this.db);
-    this.sessions = new JsonSessionRepository(sessionStore);
-    this.oidcTransactions = new JsonOIDCTransactionRepository(oidcStore);
+    this.sessions = new PostgresSessionRepository(this.db);
+    this.oidcTransactions = new PostgresOIDCTransactionRepository(this.db);
     this.unitOfWork = new PostgresUnitOfWork(this.db);
   }
 

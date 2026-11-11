@@ -171,6 +171,10 @@ export interface OIDCTransaction {
    * Optional redirect URI configured for this transaction.
    */
   redirectUri?: string;
+
+  purpose?: 'login' | 'link-account';
+
+  targetUserId?: string;
 }
 
 /**
@@ -194,6 +198,8 @@ export interface CreateTransactionOptions {
   verifierLength?: number;
   currentTime?: number;
   redirectUri?: string;
+  purpose?: 'login' | 'link-account';
+  targetUserId?: string;
 }
 
 export type SanitizedOIDCConfig = Omit<OIDCConfig, 'clientSecret'> & { hasClientSecret: boolean };
@@ -272,6 +278,15 @@ export interface IOIDCTransactionStore {
    * Resets all stored transactions (used primarily for test isolation).
    */
   clear(): void;
+}
+
+export interface IAsyncOIDCTransactionStore {
+  createTransaction(options?: CreateTransactionOptions): Promise<{
+    transaction: OIDCTransaction;
+    clientData: OIDCClientTransactionData;
+  }>;
+  getTransactionByState(state: string): Promise<OIDCTransaction | null>;
+  consumeTransaction(options: ConsumeTransactionOptions): Promise<ConsumeTransactionResult>;
 }
 
 /**
@@ -489,7 +504,7 @@ export interface ExchangeAuthorizationCodeOptions {
  * Injectable dependencies for the Authorization Code Exchange handler.
  */
 export interface ExchangeDependencies {
-  transactionStore?: IOIDCTransactionStore;
+  transactionStore?: IOIDCTransactionStore | IAsyncOIDCTransactionStore;
   jwksClient?: IJWKSClient;
   config?: OIDCConfig;
   customFetch?: typeof fetch;
@@ -555,7 +570,7 @@ export interface HandleCallbackOptions {
  * Injectable dependencies for the OIDC Orchestrator.
  */
 export interface OrchestratorDependencies {
-  transactionStore?: IOIDCTransactionStore;
+  transactionStore?: IOIDCTransactionStore | IAsyncOIDCTransactionStore;
   jwksClient?: IJWKSClient;
   config?: OIDCConfig;
   customFetch?: typeof fetch;
@@ -605,4 +620,3 @@ export interface ProvisionGoogleIdentityResult {
   error?: string;
   code?: string;
 }
-

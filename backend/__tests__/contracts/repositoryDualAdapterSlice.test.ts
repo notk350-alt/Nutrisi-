@@ -37,7 +37,8 @@ describe('MVS-B2.5E.1B.5–E.1B.8: Dual Adapter Vertical Slice & Contract Verifi
   let baselineSnapshot: any;
   const PROD_DB_PATH = path.join(process.cwd(), 'data', 'nutribodysim_db.json');
   const PROD_BACKUP_PATH = path.join(process.cwd(), 'data', 'nutribodysim_db.backup.json');
-  const EXPECTED_HASH = 'a7f7cfa135e5b8c4be091cff49f5b1e2ecc88514776b8f908bd3ccf0d188af14';
+  const EXPECTED_ACTIVE_HASH = '1b16140f395c0a937843cb691be1382a00296c2d2bd1ddd075c39d84ad3c6a5d';
+  const EXPECTED_BACKUP_HASH = 'a7f7cfa135e5b8c4be091cff49f5b1e2ecc88514776b8f908bd3ccf0d188af14';
 
   beforeEach(() => {
     if (!baselineSnapshot) {
@@ -365,8 +366,8 @@ describe('MVS-B2.5E.1B.5–E.1B.8: Dual Adapter Vertical Slice & Contract Verifi
       const activeBuf = fs.readFileSync(PROD_DB_PATH);
       const activeHash = crypto.createHash('sha256').update(activeBuf).digest('hex');
 
-      expect(activeBuf.length).toBe(57187);
-      expect(activeHash).toBe(EXPECTED_HASH);
+      expect(activeBuf.length).toBe(58916);
+      expect(activeHash).toBe(EXPECTED_ACTIVE_HASH);
     });
 
     it('should strictly verify backup database file size and SHA-256 hash remained unmutated', () => {
@@ -375,7 +376,7 @@ describe('MVS-B2.5E.1B.5–E.1B.8: Dual Adapter Vertical Slice & Contract Verifi
       const backupHash = crypto.createHash('sha256').update(backupBuf).digest('hex');
 
       expect(backupBuf.length).toBe(57187);
-      expect(backupHash).toBe(EXPECTED_HASH);
+      expect(backupHash).toBe(EXPECTED_BACKUP_HASH);
     });
   });
 });

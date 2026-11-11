@@ -13,7 +13,9 @@
  * 6. Audit Trail: Full non-repudiable audit log with action MAIN_ADMIN_BOOTSTRAP.
  */
 
-import { db } from '../database/store';
+import type { DatabaseStore } from '../database/store';
+import type { IDatabaseRepositories } from '../database/contracts';
+import { getRuntimeDb, getRuntimeRepositories, getRuntimeSelection, resolveDatabaseProvider } from '../database/runtime';
 import { defaultSessionStore, ISessionStore } from './sessionStore';
 import { User, AuditLog } from '../database/types';
 
@@ -24,7 +26,7 @@ export interface BootstrapMainAdminOptions {
   forceRecovery?: boolean;
   verifyEmail?: string;
   ipAddress?: string;
-  database?: typeof db;
+  database?: DatabaseStore | IDatabaseRepositories;
   sessionStore?: ISessionStore;
 }
 
@@ -40,7 +42,7 @@ export interface BootstrapMainAdminResult {
 /**
  * Executes Main Administrator bootstrap or emergency break-glass governance transfer.
  */
-export function executeBootstrapMainAdmin(options: BootstrapMainAdminOptions): BootstrapMainAdminResult {
+export async function executeBootstrapMainAdmin(options: BootstrapMainAdminOptions): Promise<BootstrapMainAdminResult> {
   const {
     targetUserId,
     operator,
@@ -48,10 +50,9 @@ export function executeBootstrapMainAdmin(options: BootstrapMainAdminOptions): B
     forceRecovery = false,
     verifyEmail,
     ipAddress = '127.0.0.1 (CLI)',
-    database = db,
+    database: injectedDatabase,
     sessionStore = defaultSessionStore
   } = options;
-
   // 1. Mandatory operator verification
   if (!operator || typeof operator !== 'string' || !operator.trim()) {
     throw new Error('BOOTSTRAP_VALIDATION_ERROR: Operator identity is mandatory for non-repudiable audit attribution.');
@@ -63,6 +64,129 @@ export function executeBootstrapMainAdmin(options: BootstrapMainAdminOptions): B
   }
 
   const trimmedTargetId = targetUserId.trim();
+
+  const runtime = getRuntimeSelection();
+  let repositories: IDatabaseRepositories | undefined;
+  if (resolveDatabaseProvider() === 'postgres') {
+    if (runtime?.provider !== 'postgres') {
+      throw new Error('PostgreSQL runtime must be initialized before Main Administrator bootstrap.');
+    }
+    if (injectedDatabase && injectedDatabase !== runtime.repositories) {
+      throw new Error('Main Administrator bootstrap must use the initialized PostgreSQL repositories.');
+    }
+    repositories = getRuntimeRepositories();
+  } else if (injectedDatabase && 'unitOfWork' in injectedDatabase) {
+    repositories = injectedDatabase;
+  }
+
+  if (repositories) {
+    const result = await repositories.unitOfWork.runInTransaction(async tx => {
+      const targetUser = await repositories.users.findById(trimmedTargetId, tx);
+      if (!targetUser) {
+        throw new Error(`TARGET_NOT_FOUND: User with ID '${trimmedTargetId}' does not exist in the server registry.`);
+      }
+
+      if (verifyEmail && typeof verifyEmail === 'string' &&
+        targetUser.email.toLowerCase() !== verifyEmail.trim().toLowerCase()) {
+        throw new Error(
+          `IDENTITY_MISMATCH: Provided verification email '${verifyEmail}' does not match registered email '${targetUser.email}' for user '${trimmedTargetId}'.`
+        );
+      }
+
+      if (targetUser.account_status && targetUser.account_status !== 'ACTIVE') {
+        throw new Error(
+          `ACCOUNT_NOT_ACTIVE: Target user '${trimmedTargetId}' is in '${targetUser.account_status}' state. Only ACTIVE accounts may be provisioned as Main Administrator.`
+        );
+      }
+
+      const activeUsers = (await repositories.users.listAll(tx)).filter(
+        user => user.is_main_admin === true && (!user.account_status || user.account_status === 'ACTIVE')
+      );
+      const existingMainAdmin = activeUsers[0];
+      const trimmedOperator = operator.trim();
+      const now = new Date().toISOString();
+      if (existingMainAdmin?.id === targetUser.id) {
+        const auditLog = await repositories.auditLogs.appendLog({
+          user_id: targetUser.id,
+          user_name: targetUser.name,
+          action: 'MAIN_ADMIN_BOOTSTRAP',
+          entity_type: 'USER',
+          entity_id: targetUser.id,
+          details: `Idempotent bootstrap check: ${targetUser.name} (${targetUser.id}) is already active Main Administrator. Requested by operator ${trimmedOperator}.`,
+          ip_address: ipAddress,
+          timestamp: now
+        }, tx);
+        await repositories.sessions.revokeSessionsForUser(targetUser.id, tx);
+        return { user: targetUser, auditLog, idempotent: true };
+      }
+
+      if (existingMainAdmin && !forceRecovery) {
+        throw new Error(
+          `GOVERNANCE_ALREADY_INITIALIZED: Active Main Administrator already exists (${existingMainAdmin.name} - ${existingMainAdmin.id}). Direct bootstrap blocked to prevent takeover. Use emergency break-glass recovery (--force-recovery) with detailed reason if authorized.`
+        );
+      }
+
+      if (existingMainAdmin && forceRecovery && (!reason || reason.trim().length < 10)) {
+        throw new Error(
+          'INVALID_RECOVERY_REASON: Emergency break-glass recovery requires a comprehensive justification reason (at least 10 characters).'
+        );
+      }
+
+      let previousMainAdmin: User | undefined;
+      if (existingMainAdmin && existingMainAdmin.id !== targetUser.id) {
+        previousMainAdmin = await repositories.users.update(existingMainAdmin.id, {
+          is_main_admin: false,
+          permissions: existingMainAdmin.permissions.filter(permission => permission !== 'MANAGE_PRIVILEGED_ROLES'),
+          governance_granted_at: null,
+          governance_granted_by: null,
+          token_version: (existingMainAdmin.token_version || 0) + 1,
+          updated_at: now
+        }, tx);
+        if (previousMainAdmin.is_main_admin !== false) {
+          throw new Error('MAIN_ADMIN_REPOSITORY_UPDATE_UNSUPPORTED: Repository did not persist governance revocation.');
+        }
+        await repositories.sessions.revokeSessionsForUser(previousMainAdmin.id, tx);
+      }
+
+      const targetPermissions = [...targetUser.permissions];
+      if (!targetPermissions.includes('ADMIN')) targetPermissions.push('ADMIN');
+      if (!targetPermissions.includes('MANAGE_PRIVILEGED_ROLES')) targetPermissions.push('MANAGE_PRIVILEGED_ROLES');
+      const updatedUser = await repositories.users.update(targetUser.id, {
+        is_main_admin: true,
+        role: 'Admin',
+        permissions: targetPermissions,
+        governance_granted_at: now,
+        governance_granted_by: operator.trim(),
+        token_version: (targetUser.token_version || 0) + 1,
+        updated_at: now
+      }, tx);
+      if (
+        updatedUser.is_main_admin !== true ||
+        updatedUser.governance_granted_at !== now ||
+        updatedUser.governance_granted_by !== trimmedOperator
+      ) {
+        throw new Error('MAIN_ADMIN_REPOSITORY_UPDATE_UNSUPPORTED: Repository did not persist Main Administrator governance fields.');
+      }
+      const auditLog = await repositories.auditLogs.appendLog({
+        user_id: updatedUser.id,
+        user_name: updatedUser.name,
+        action: 'MAIN_ADMIN_BOOTSTRAP',
+        entity_type: 'USER',
+        entity_id: updatedUser.id,
+        details: previousMainAdmin
+          ? `Emergency break-glass governance transfer to ${updatedUser.name} (${updatedUser.id}) from ${previousMainAdmin.name} (${previousMainAdmin.id}) by operator ${trimmedOperator}. Reason: ${reason!.trim()}`
+          : `Main Administrator initial bootstrap provisioned for ${updatedUser.name} (${updatedUser.id}) by operator ${trimmedOperator}.`,
+        ip_address: ipAddress,
+        timestamp: now
+      }, tx);
+      await repositories.sessions.revokeSessionsForUser(updatedUser.id, tx);
+      return { user: updatedUser, auditLog, previousMainAdmin };
+    });
+
+    return formatBootstrapResult(result);
+  }
+
+  const database = (injectedDatabase as DatabaseStore | undefined) ?? getRuntimeDb();
 
   // 3. Target existence and verification in server registry
   const state = database.getState();
@@ -104,6 +228,15 @@ export function executeBootstrapMainAdmin(options: BootstrapMainAdminOptions): B
     sessionStore.revokeSessionsForUser(result.user.id);
   }
 
+  return formatBootstrapResult(result);
+}
+
+function formatBootstrapResult(result: {
+  user: User;
+  auditLog: AuditLog;
+  previousMainAdmin?: User;
+  idempotent?: boolean;
+}): BootstrapMainAdminResult {
   let message = `Main Administrator successfully provisioned for user ${result.user.name} (${result.user.id}).`;
   if (result.idempotent) {
     message = `Idempotent operation: User ${result.user.name} (${result.user.id}) is already the active Main Administrator.`;

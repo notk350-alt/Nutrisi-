@@ -18,8 +18,10 @@ import {
   timestamp,
   jsonb,
   unique,
-  index
+  index,
+  check
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import { users } from './identity';
 import type { ProjectType, TeamRole } from '../types';
 
@@ -55,12 +57,13 @@ export const teamMembers = pgTable(
     userId: varchar('user_id', { length: 64 })
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
-    role: varchar('role', { length: 32 }).notNull(),
+    role: varchar('role', { length: 32 }).$type<TeamRole>().notNull(),
     joinedAt: timestamp('joined_at', { withTimezone: true }).notNull().defaultNow()
   },
   (table) => [
     unique('uq_team_members_team_user').on(table.teamId, table.userId),
-    index('idx_team_members_user').on(table.userId)
+    index('idx_team_members_user').on(table.userId),
+    check('team_members_role_check', sql`${table.role} IN ('Owner', 'Editor', 'Collaborator', 'Viewer')`)
   ]
 );
 
@@ -86,7 +89,11 @@ export const projects = pgTable(
   (table) => [
     index('idx_projects_owner_id').on(table.ownerId),
     index('idx_projects_team_id').on(table.teamId),
-    index('idx_projects_is_public').on(table.isPublic)
+    index('idx_projects_is_public').on(table.isPublic),
+    check(
+      'projects_type_check',
+      sql`${table.type} IN ('Personal', 'Academic', 'Research', 'Experiment', 'Team', 'Assignment')`
+    )
   ]
 );
 
@@ -108,6 +115,7 @@ export const projectMembers = pgTable(
   },
   (table) => [
     unique('uq_project_members_project_user').on(table.projectId, table.userId),
-    index('idx_project_members_user').on(table.userId)
+    index('idx_project_members_user').on(table.userId),
+    check('project_members_role_check', sql`${table.role} IN ('Owner', 'Editor', 'Collaborator', 'Viewer')`)
   ]
 );

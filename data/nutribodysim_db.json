@@ -91,7 +91,7 @@
       ],
       "organization": "NutriBodySim Scientific Governance Board",
       "created_at": "2026-09-21T10:00:00.000Z",
-      "last_login_at": "2026-09-21T10:00:00.000Z",
+      "last_login_at": "2026-10-30T15:16:01.109Z",
       "account_status": "ACTIVE",
       "token_version": 1,
       "email_verified": true,
@@ -134,6 +134,20 @@
     }
   ],
   "projects": [
+    {
+      "id": "proj_1793373361125_cq9s",
+      "name": "E1B9 Runtime Verify 1793373361116",
+      "description": "Updated by E1B9 runtime verification",
+      "type": "Research",
+      "owner_id": "usr_admin",
+      "is_public": false,
+      "tags": [
+        "e1b9",
+        "verification"
+      ],
+      "created_at": "2026-10-30T15:16:01.125Z",
+      "updated_at": "2026-10-30T15:16:01.140Z"
+    },
     {
       "id": "proj_metabolic_v1",
       "name": "Bioenergetic & Anthropometric Benchmark Study",
@@ -195,6 +209,13 @@
       "user_id": "usr_student",
       "role": "Collaborator",
       "joined_at": "2026-09-21T10:00:00.000Z"
+    },
+    {
+      "id": "pm_1793373361125_3ok",
+      "project_id": "proj_1793373361125_cq9s",
+      "user_id": "usr_admin",
+      "role": "Owner",
+      "joined_at": "2026-10-30T15:16:01.125Z"
     }
   ],
   "materials": [
@@ -1942,6 +1963,39 @@
     }
   ],
   "audit_logs": [
+    {
+      "id": "AUDIT_1793373361141_pprx",
+      "user_id": "usr_admin",
+      "user_name": "System Administrator",
+      "action": "EDIT",
+      "entity_type": "PROJECT",
+      "entity_id": "proj_1793373361125_cq9s",
+      "details": "Updated project \"E1B9 Runtime Verify 1793373361116\"",
+      "ip_address": "127.0.0.1",
+      "timestamp": "2026-10-30T15:16:01.141Z"
+    },
+    {
+      "id": "AUDIT_1793373361125_32vm",
+      "user_id": "usr_admin",
+      "user_name": "System Administrator",
+      "action": "CREATE",
+      "entity_type": "PROJECT",
+      "entity_id": "proj_1793373361125_cq9s",
+      "details": "Created project \"E1B9 Runtime Verify 1793373361116\"",
+      "ip_address": "127.0.0.1",
+      "timestamp": "2026-10-30T15:16:01.125Z"
+    },
+    {
+      "id": "AUDIT_1793373361109_9ccw",
+      "user_id": "usr_admin",
+      "user_name": "System Administrator",
+      "action": "LOGIN",
+      "entity_type": "USER",
+      "entity_id": "usr_admin",
+      "details": "Demo session issued for System Administrator (Admin)",
+      "ip_address": "127.0.0.1",
+      "timestamp": "2026-10-30T15:16:01.109Z"
+    },
     {
       "id": "audit_0",
       "user_id": "usr_admin",

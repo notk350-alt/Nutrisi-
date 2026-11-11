@@ -15,7 +15,30 @@
 
 import { Request, Response, NextFunction, RequestHandler } from 'express';
 import { User, UserRole, Permission } from '../database/types';
-import { db } from '../database/store';
+import { getRuntimeDb, getRuntimeSelection } from '../database/runtime';
+import type { IAuditLogRepository } from '../database/contracts';
+
+async function getAuditRepository(): Promise<IAuditLogRepository> {
+  const runtime = getRuntimeSelection();
+  if (runtime) return runtime.repositories.auditLogs;
+  if (process.env.VITEST_POOL_ID || process.env.VITEST_WORKER_ID) {
+    const { createLowdbJsonDatabase } = await import('../database/adapters/lowdbJsonDatabase');
+    return createLowdbJsonDatabase(getRuntimeDb()).auditLogs;
+  }
+  throw new Error('Database runtime must be initialized before authorization auditing.');
+}
+
+async function auditAuthorizationFailure(req: Request, details: string): Promise<void> {
+  if (!req.user) throw new Error('Cannot audit an authorization failure without an authenticated user.');
+  await (await getAuditRepository()).appendLog({
+    user_id: req.user.id,
+    user_name: req.user.name,
+    action: 'VERIFY',
+    entity_type: 'SECURITY_RBAC',
+    entity_id: req.path,
+    details
+  });
+}
 
 /**
  * Closed set of recognized permissions in NutriBodySim.
@@ -190,23 +213,19 @@ export function requirePermission(...permissions: Permission[]): RequestHandler 
 
     const missing = permissions.filter(p => !hasPermission(req.user!, p));
     if (missing.length > 0) {
-      try {
-        db.logAudit(
-          req.user.id,
-          'LOGIN',
-          'SECURITY_RBAC',
-          req.path,
-          `Permission denied: user ${req.user.name} (${req.user.role}) lacks permissions [${missing.join(', ')}] on ${req.method} ${req.path}`
-        );
-      } catch {}
-
-      return res.status(403).json({
-        error: `Forbidden: Insufficient permissions. Missing: [${missing.join(', ')}].`,
-        code: 'FORBIDDEN',
-        required_permissions: permissions,
-        missing_permissions: missing,
-        user_role: req.user.role
-      });
+      void auditAuthorizationFailure(
+        req,
+        `Permission denied: user ${req.user.name} (${req.user.role}) lacks permissions [${missing.join(', ')}] on ${req.method} ${req.path}`
+      ).then(() => {
+        res.status(403).json({
+          error: `Forbidden: Insufficient permissions. Missing: [${missing.join(', ')}].`,
+          code: 'FORBIDDEN',
+          required_permissions: permissions,
+          missing_permissions: missing,
+          user_role: req.user!.role
+        });
+      }).catch(next);
+      return;
     }
 
     return next();
@@ -234,22 +253,18 @@ export function requireAnyPermission(...permissions: Permission[]): RequestHandl
     }
 
     if (!hasAnyPermission(req.user, permissions)) {
-      try {
-        db.logAudit(
-          req.user.id,
-          'LOGIN',
-          'SECURITY_RBAC',
-          req.path,
-          `Permission denied: user ${req.user.name} (${req.user.role}) lacks any of permissions [${permissions.join(', ')}] on ${req.method} ${req.path}`
-        );
-      } catch {}
-
-      return res.status(403).json({
-        error: `Forbidden: Insufficient permissions. Requires at least one of: [${permissions.join(', ')}].`,
-        code: 'FORBIDDEN',
-        required_permissions: permissions,
-        user_role: req.user.role
-      });
+      void auditAuthorizationFailure(
+        req,
+        `Permission denied: user ${req.user.name} (${req.user.role}) lacks any of permissions [${permissions.join(', ')}] on ${req.method} ${req.path}`
+      ).then(() => {
+        res.status(403).json({
+          error: `Forbidden: Insufficient permissions. Requires at least one of: [${permissions.join(', ')}].`,
+          code: 'FORBIDDEN',
+          required_permissions: permissions,
+          user_role: req.user!.role
+        });
+      }).catch(next);
+      return;
     }
 
     return next();
@@ -277,22 +292,18 @@ export function requireRole(...allowedRoles: UserRole[]): RequestHandler {
     }
 
     if (!hasRole(req.user, ...allowedRoles)) {
-      try {
-        db.logAudit(
-          req.user.id,
-          'LOGIN',
-          'SECURITY_RBAC',
-          req.path,
-          `Role denied: user ${req.user.name} (${req.user.role}) is not in allowed roles [${allowedRoles.join(', ')}] on ${req.method} ${req.path}`
-        );
-      } catch {}
-
-      return res.status(403).json({
-        error: `Forbidden: Role "${req.user.role}" is not authorized for this resource. Required one of: [${allowedRoles.join(', ')}].`,
-        code: 'FORBIDDEN',
-        allowed_roles: allowedRoles,
-        user_role: req.user.role
-      });
+      void auditAuthorizationFailure(
+        req,
+        `Role denied: user ${req.user.name} (${req.user.role}) is not in allowed roles [${allowedRoles.join(', ')}] on ${req.method} ${req.path}`
+      ).then(() => {
+        res.status(403).json({
+          error: `Forbidden: Role "${req.user!.role}" is not authorized for this resource. Required one of: [${allowedRoles.join(', ')}].`,
+          code: 'FORBIDDEN',
+          allowed_roles: allowedRoles,
+          user_role: req.user!.role
+        });
+      }).catch(next);
+      return;
     }
 
     return next();
@@ -320,22 +331,18 @@ export function requireAdmin(): RequestHandler {
     }
 
     if (!hasPermission(req.user, 'ADMIN')) {
-      try {
-        db.logAudit(
-          req.user.id,
-          'LOGIN',
-          'SECURITY_RBAC',
-          req.path,
-          `Admin access denied: user ${req.user.name} (${req.user.role}) attempted administrative access on ${req.method} ${req.path}`
-        );
-      } catch {}
-
-      return res.status(403).json({
-        error: 'Forbidden: Administrative privilege required (ADMIN permission or Admin role).',
-        code: 'FORBIDDEN',
-        required_permission: 'ADMIN',
-        user_role: req.user.role
-      });
+      void auditAuthorizationFailure(
+        req,
+        `Admin access denied: user ${req.user.name} (${req.user.role}) attempted administrative access on ${req.method} ${req.path}`
+      ).then(() => {
+        res.status(403).json({
+          error: 'Forbidden: Administrative privilege required (ADMIN permission or Admin role).',
+          code: 'FORBIDDEN',
+          required_permission: 'ADMIN',
+          user_role: req.user!.role
+        });
+      }).catch(next);
+      return;
     }
 
     return next();
@@ -364,25 +371,20 @@ export function requirePrivilegedRole(): RequestHandler {
     }
 
     if (!hasPermission(req.user, 'MANAGE_PRIVILEGED_ROLES')) {
-      try {
-        db.logAudit(
-          req.user.id,
-          'LOGIN',
-          'SECURITY_RBAC',
-          req.path,
-          `Privileged role access denied: user ${req.user.name} (${req.user.role}) attempted privileged governance access on ${req.method} ${req.path}`
-        );
-      } catch {}
-
-      return res.status(403).json({
-        error: 'Forbidden: Main Administrator privilege required (MANAGE_PRIVILEGED_ROLES).',
-        code: 'FORBIDDEN_PRIVILEGED_ROLE',
-        required_permission: 'MANAGE_PRIVILEGED_ROLES',
-        user_role: req.user.role
-      });
+      void auditAuthorizationFailure(
+        req,
+        `Privileged role access denied: user ${req.user.name} (${req.user.role}) attempted privileged governance access on ${req.method} ${req.path}`
+      ).then(() => {
+        res.status(403).json({
+          error: 'Forbidden: Main Administrator privilege required (MANAGE_PRIVILEGED_ROLES).',
+          code: 'FORBIDDEN_PRIVILEGED_ROLE',
+          required_permission: 'MANAGE_PRIVILEGED_ROLES',
+          user_role: req.user!.role
+        });
+      }).catch(next);
+      return;
     }
 
     return next();
   };
 }
-

@@ -19,6 +19,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import express, { Express, Request, Response } from 'express';
 import http from 'http';
 import { db } from '../database/store';
+import { createLowdbJsonDatabase } from '../database/adapters/lowdbJsonDatabase';
 import { defaultSessionStore } from '../auth/sessionStore';
 import { executeBootstrapMainAdmin } from '../auth/bootstrapMainAdmin';
 import { 
@@ -107,12 +108,28 @@ describe('NutriBodySim MVS-B2.5B.2: Secure Main Administrator Bootstrap & Govern
     db.save();
   });
 
+  it('supports asynchronous repository-backed bootstrap with transactional session revocation', async () => {
+    const repositories = createLowdbJsonDatabase(db);
+    const session = defaultSessionStore.createSession('usr_admin');
+
+    const result = await executeBootstrapMainAdmin({
+      targetUserId: 'usr_admin',
+      operator: 'repository-test-operator',
+      database: repositories
+    });
+
+    expect(result.user.is_main_admin).toBe(true);
+    expect(result.user.governance_granted_by).toBe('repository-test-operator');
+    expect(result.auditLog.action).toBe('MAIN_ADMIN_BOOTSTRAP');
+    expect(defaultSessionStore.validateSession(session.token).valid).toBe(false);
+  });
+
   describe('1. Provisioning & Operator Attribution Verification', () => {
-    it('successfully provisions Main Administrator for a valid active user with full audit trail', () => {
+    it('successfully provisions Main Administrator for a valid active user with full audit trail', async () => {
       const targetUser = db.getState().users.find(u => u.id === 'usr_admin')!;
       expect(targetUser.is_main_admin).toBeFalsy();
 
-      const result = executeBootstrapMainAdmin({
+      const result = await executeBootstrapMainAdmin({
         targetUserId: 'usr_admin',
         operator: 'devops-lead@nutribodysim.org',
         verifyEmail: 'admin@nutribodysim.org'
@@ -135,91 +152,75 @@ describe('NutriBodySim MVS-B2.5B.2: Secure Main Administrator Bootstrap & Govern
       expect(latestAudit.details).toContain('devops-lead@nutribodysim.org');
     });
 
-    it('rejects bootstrap when operator attribution is missing or empty string', () => {
-      expect(() => {
-        executeBootstrapMainAdmin({
+    it('rejects bootstrap when operator attribution is missing or empty string', async () => {
+      await expect(executeBootstrapMainAdmin({
           targetUserId: 'usr_admin',
           operator: ''
-        });
-      }).toThrow(/Operator identity is mandatory/i);
+        })).rejects.toThrow(/Operator identity is mandatory/i);
 
-      expect(() => {
-        executeBootstrapMainAdmin({
+      await expect(executeBootstrapMainAdmin({
           targetUserId: 'usr_admin',
           operator: '   '
-        });
-      }).toThrow(/Operator identity is mandatory/i);
+        })).rejects.toThrow(/Operator identity is mandatory/i);
     });
 
-    it('rejects bootstrap when targetUserId is missing or empty', () => {
-      expect(() => {
-        executeBootstrapMainAdmin({
+    it('rejects bootstrap when targetUserId is missing or empty', async () => {
+      await expect(executeBootstrapMainAdmin({
           targetUserId: '',
           operator: 'ops@nutribodysim.org'
-        });
-      }).toThrow(/Target user_id is required/i);
+        })).rejects.toThrow(/Target user_id is required/i);
     });
 
-    it('rejects bootstrap when target user does not exist in registry', () => {
-      expect(() => {
-        executeBootstrapMainAdmin({
+    it('rejects bootstrap when target user does not exist in registry', async () => {
+      await expect(executeBootstrapMainAdmin({
           targetUserId: 'usr_nonexistent_attacker',
           operator: 'ops@nutribodysim.org'
-        });
-      }).toThrow(/TARGET_NOT_FOUND.*usr_nonexistent_attacker/i);
+        })).rejects.toThrow(/TARGET_NOT_FOUND.*usr_nonexistent_attacker/i);
     });
 
-    it('rejects bootstrap if target account is SUSPENDED or DISABLED', () => {
+    it('rejects bootstrap if target account is SUSPENDED or DISABLED', async () => {
       const state = db.getState();
       const adminUser = state.users.find(u => u.id === 'usr_admin')!;
       adminUser.account_status = 'SUSPENDED';
       db.save();
 
-      expect(() => {
-        executeBootstrapMainAdmin({
+      await expect(executeBootstrapMainAdmin({
           targetUserId: 'usr_admin',
           operator: 'ops@nutribodysim.org'
-        });
-      }).toThrow(/ACCOUNT_NOT_ACTIVE.*SUSPENDED/i);
+        })).rejects.toThrow(/ACCOUNT_NOT_ACTIVE.*SUSPENDED/i);
 
       // Test DISABLED status
       adminUser.account_status = 'DISABLED';
       db.save();
 
-      expect(() => {
-        executeBootstrapMainAdmin({
+      await expect(executeBootstrapMainAdmin({
           targetUserId: 'usr_admin',
           operator: 'ops@nutribodysim.org'
-        });
-      }).toThrow(/ACCOUNT_NOT_ACTIVE.*DISABLED/i);
+        })).rejects.toThrow(/ACCOUNT_NOT_ACTIVE.*DISABLED/i);
     });
 
-    it('rejects bootstrap when verifyEmail does not match target user email in registry', () => {
-      expect(() => {
-        executeBootstrapMainAdmin({
+    it('rejects bootstrap when verifyEmail does not match target user email in registry', async () => {
+      await expect(executeBootstrapMainAdmin({
           targetUserId: 'usr_admin',
           operator: 'ops@nutribodysim.org',
           verifyEmail: 'imposter@nutribodysim.org'
-        });
-      }).toThrow(/IDENTITY_MISMATCH/i);
+        })).rejects.toThrow(/IDENTITY_MISMATCH/i);
     });
   });
 
   describe('2. Anti-Takeover & Idempotency Controls', () => {
-    it('blocks subsequent bootstrap by another user when an active Main Admin exists (Anti-Takeover)', () => {
+    it('blocks subsequent bootstrap by another user when an active Main Admin exists (Anti-Takeover)', async () => {
       // First bootstrap succeeds
-      executeBootstrapMainAdmin({
+      await executeBootstrapMainAdmin({
         targetUserId: 'usr_admin',
         operator: 'ops@nutribodysim.org'
       });
 
       // Attacker tries to bootstrap another user without break-glass flags
-      expect(() => {
-        executeBootstrapMainAdmin({
+      await expect(executeBootstrapMainAdmin({
           targetUserId: 'usr_researcher',
           operator: 'malicious-operator'
-        });
-      }).toThrow(/GOVERNANCE_ALREADY_INITIALIZED/i);
+        })).rejects.toThrow(/GOVERNANCE_ALREADY_INITIALIZED/i);
 
       // Confirm usr_admin is still the only Main Admin
       const state = db.getState();
@@ -229,14 +230,14 @@ describe('NutriBodySim MVS-B2.5B.2: Secure Main Administrator Bootstrap & Govern
       expect(researcher.is_main_admin).toBeFalsy();
     });
 
-    it('handles idempotent re-execution cleanly for the current active Main Administrator', () => {
-      executeBootstrapMainAdmin({
+    it('handles idempotent re-execution cleanly for the current active Main Administrator', async () => {
+      await executeBootstrapMainAdmin({
         targetUserId: 'usr_admin',
         operator: 'ops@nutribodysim.org'
       });
 
       // Second execution on same user
-      const result = executeBootstrapMainAdmin({
+      const result = await executeBootstrapMainAdmin({
         targetUserId: 'usr_admin',
         operator: 'ops@nutribodysim.org'
       });
@@ -250,9 +251,9 @@ describe('NutriBodySim MVS-B2.5B.2: Secure Main Administrator Bootstrap & Govern
       expect(latestAudit.details).toContain('Idempotent bootstrap check');
     });
 
-    it('enforces emergency break-glass recovery when --force-recovery is supplied with valid reason', () => {
+    it('enforces emergency break-glass recovery when --force-recovery is supplied with valid reason', async () => {
       // 1. Initial Main Admin
-      executeBootstrapMainAdmin({
+      await executeBootstrapMainAdmin({
         targetUserId: 'usr_admin',
         operator: 'ops@nutribodysim.org'
       });
@@ -263,7 +264,7 @@ describe('NutriBodySim MVS-B2.5B.2: Secure Main Administrator Bootstrap & Govern
 
       // 2. Break-glass governance transfer to another user
       const reason = 'Emergency Incident INC-9901: Primary keys lost; authorized failover';
-      const result = executeBootstrapMainAdmin({
+      const result = await executeBootstrapMainAdmin({
         targetUserId: 'usr_researcher',
         operator: 'chief-security-officer',
         forceRecovery: true,
@@ -292,30 +293,26 @@ describe('NutriBodySim MVS-B2.5B.2: Secure Main Administrator Bootstrap & Govern
       expect(latestAudit.details).toContain('INC-9901');
     });
 
-    it('rejects break-glass recovery if reason is missing or shorter than 10 characters', () => {
-      executeBootstrapMainAdmin({
+    it('rejects break-glass recovery if reason is missing or shorter than 10 characters', async () => {
+      await executeBootstrapMainAdmin({
         targetUserId: 'usr_admin',
         operator: 'ops@nutribodysim.org'
       });
 
       // Missing reason
-      expect(() => {
-        executeBootstrapMainAdmin({
+      await expect(executeBootstrapMainAdmin({
           targetUserId: 'usr_researcher',
           operator: 'chief-sec',
           forceRecovery: true
-        });
-      }).toThrow(/INVALID_RECOVERY_REASON/i);
+        })).rejects.toThrow(/INVALID_RECOVERY_REASON/i);
 
       // Too short reason (< 10 chars)
-      expect(() => {
-        executeBootstrapMainAdmin({
+      await expect(executeBootstrapMainAdmin({
           targetUserId: 'usr_researcher',
           operator: 'chief-sec',
           forceRecovery: true,
           reason: 'Short'
-        });
-      }).toThrow(/INVALID_RECOVERY_REASON/i);
+        })).rejects.toThrow(/INVALID_RECOVERY_REASON/i);
     });
   });
 
@@ -371,8 +368,8 @@ describe('NutriBodySim MVS-B2.5B.2: Secure Main Administrator Bootstrap & Govern
       expect(hasPermission(fakeAdminStudent, 'MANAGE_PRIVILEGED_ROLES')).toBe(false);
     });
 
-    it('verified active Main Administrator with role Admin POSSESSES MANAGE_PRIVILEGED_ROLES', () => {
-      executeBootstrapMainAdmin({
+    it('verified active Main Administrator with role Admin POSSESSES MANAGE_PRIVILEGED_ROLES', async () => {
+      await executeBootstrapMainAdmin({
         targetUserId: 'usr_admin',
         operator: 'ops@nutribodysim.org'
       });
@@ -382,8 +379,8 @@ describe('NutriBodySim MVS-B2.5B.2: Secure Main Administrator Bootstrap & Govern
       expect(getEffectivePermissions(bootstrapped).has('MANAGE_PRIVILEGED_ROLES')).toBe(true);
     });
 
-    it('account suspension of Main Administrator immediately revokes all permissions (Fail-Closed)', () => {
-      executeBootstrapMainAdmin({
+    it('account suspension of Main Administrator immediately revokes all permissions (Fail-Closed)', async () => {
+      await executeBootstrapMainAdmin({
         targetUserId: 'usr_admin',
         operator: 'ops@nutribodysim.org'
       });
@@ -436,7 +433,7 @@ describe('NutriBodySim MVS-B2.5B.2: Secure Main Administrator Bootstrap & Govern
     });
 
     it('bootstrapped Main Administrator is allowed on requirePrivilegedRole()', async () => {
-      executeBootstrapMainAdmin({
+      await executeBootstrapMainAdmin({
         targetUserId: 'usr_admin',
         operator: 'ops@nutribodysim.org'
       });
@@ -451,7 +448,7 @@ describe('NutriBodySim MVS-B2.5B.2: Secure Main Administrator Bootstrap & Govern
     });
 
     it('suspended Main Administrator is rejected with 403 FORBIDDEN_ACCOUNT_STATUS', async () => {
-      executeBootstrapMainAdmin({
+      await executeBootstrapMainAdmin({
         targetUserId: 'usr_admin',
         operator: 'ops@nutribodysim.org'
       });
@@ -522,7 +519,7 @@ describe('NutriBodySim MVS-B2.5B.2: Secure Main Administrator Bootstrap & Govern
   });
 
   describe('6. Storage Failure & Atomic Rollback Verification', () => {
-    it('rolls back target user and audit log completely if disk save fails', () => {
+    it('rolls back target user and audit log completely if disk save fails', async () => {
       const targetUser = db.getState().users.find(u => u.id === 'usr_admin')!;
       const originalPermissions = [...targetUser.permissions];
       const initialAuditCount = db.getState().audit_logs.length;
@@ -534,12 +531,10 @@ describe('NutriBodySim MVS-B2.5B.2: Secure Main Administrator Bootstrap & Govern
       });
 
       try {
-        expect(() => {
-          executeBootstrapMainAdmin({
+        await expect(executeBootstrapMainAdmin({
             targetUserId: 'usr_admin',
             operator: 'ops@nutribodysim.org'
-          });
-        }).toThrow(/ENOSPC/);
+          })).rejects.toThrow(/ENOSPC/);
 
         // Verify target user was restored
         expect(targetUser.is_main_admin).toBeFalsy();

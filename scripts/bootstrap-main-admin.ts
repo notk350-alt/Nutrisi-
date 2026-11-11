@@ -107,7 +107,7 @@ async function main() {
   console.log(`  Mode:           ${forceRecovery ? 'BREAK_GLASS_RECOVERY' : 'INITIAL_PROVISIONING'}`);
 
   try {
-    const result = executeBootstrapMainAdmin({
+    const result = await executeBootstrapMainAdmin({
       targetUserId: userId,
       operator,
       reason,

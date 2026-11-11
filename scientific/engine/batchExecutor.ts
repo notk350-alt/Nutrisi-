@@ -35,7 +35,7 @@ import { ModuleResolver, ResolvableModule } from '../resolvers/moduleResolver';
 import { ParameterResolver } from '../resolvers/parameterResolver';
 import { executeModuleRequest } from './executionAdapter';
 import { ValidationEngine } from './validationEngine';
-import crypto from 'crypto';
+import { secureRandomHex } from '../crypto';
 
 export interface ExecuteBatchOptions {
   request: BatchExecutionRequest;
@@ -235,7 +235,7 @@ export class BatchExecutor {
       }
 
       // Generate distinct execution identifier for this record
-      const recordExecutionId = `EXEC_${request.batch_id}_${record.record_id}_${crypto.randomBytes(4).toString('hex')}`;
+      const recordExecutionId = `EXEC_${request.batch_id}_${record.record_id}_${secureRandomHex(4)}`;
 
       try {
         // Execute record through standard C1–C5 execution pipeline

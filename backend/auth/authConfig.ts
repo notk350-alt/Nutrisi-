@@ -2,8 +2,7 @@
  * NutriBodySim — Authentication Configuration & Environment Guard (MVS-B2.2)
  *
  * Ensures strict separation between DEMO mode and PRODUCTION mode.
- * In PRODUCTION (process.env.NODE_ENV === 'production'), demo mode is BLOCKED
- * unless explicitly enabled via ENABLE_DEMO_AUTH === 'true'.
+ * Demo mode is always blocked in PRODUCTION, regardless of environment overrides.
  */
 
 export interface AuthConfig {
@@ -13,19 +12,20 @@ export interface AuthConfig {
 }
 
 export function getAuthConfig(): AuthConfig {
-  const isProduction = process.env.NODE_ENV === 'production';
-  // If in production, demo authentication MUST NOT be active unless explicitly overridden
-  const enableDemoAuth = isProduction
-    ? process.env.ENABLE_DEMO_AUTH === 'true'
-    : process.env.ENABLE_DEMO_AUTH !== 'false';
+  const environment = process.env.NODE_ENV;
+  const isProduction = environment === 'production';
+  const demoEnvironment = environment === undefined || environment === 'development' || environment === 'test';
+  const enableDemoAuth = demoEnvironment && process.env.ENABLE_DEMO_AUTH === 'true';
 
-  const sessionTtlSeconds = process.env.SESSION_TTL_SECONDS
-    ? Number(process.env.SESSION_TTL_SECONDS)
-    : 86400; // 24 hours default
+  const rawSessionTtl = process.env.SESSION_TTL_SECONDS?.trim();
+  const sessionTtlSeconds = rawSessionTtl ? Number(rawSessionTtl) : 86400;
+  if (!Number.isSafeInteger(sessionTtlSeconds) || sessionTtlSeconds <= 0) {
+    throw new Error('SESSION_TTL_SECONDS must be a positive integer.');
+  }
 
   return {
     isProduction,
     enableDemoAuth,
-    sessionTtlSeconds: isNaN(sessionTtlSeconds) || sessionTtlSeconds <= 0 ? 86400 : sessionTtlSeconds
+    sessionTtlSeconds
   };
 }

@@ -102,6 +102,7 @@ export interface IExternalIdentityRepository {
 export interface IRoleRequestRepository {
   create(request: RoleRequest, tx?: ITransactionContext): Promise<RoleRequest>;
   findById(requestId: string, tx?: ITransactionContext): Promise<RoleRequest | null>;
+  listAll(tx?: ITransactionContext): Promise<RoleRequest[]>;
   listPending(tx?: ITransactionContext): Promise<RoleRequest[]>;
   listByUserId(userId: string, tx?: ITransactionContext): Promise<RoleRequest[]>;
   findPendingByUserAndRole(userId: string, requestedRole: RequestedRole, tx?: ITransactionContext): Promise<RoleRequest | null>;
@@ -110,7 +111,8 @@ export interface IRoleRequestRepository {
     status: ApprovalStatus,
     reviewerId: string,
     reviewReason?: string | null,
-    tx?: ITransactionContext
+    tx?: ITransactionContext,
+    expectedStatus?: ApprovalStatus
   ): Promise<RoleRequest>;
 }
 
@@ -120,6 +122,7 @@ export interface IRoleRequestRepository {
 
 export interface IProjectRepository {
   findById(id: string, tx?: ITransactionContext): Promise<Project | null>;
+  listAll(tx?: ITransactionContext): Promise<Project[]>;
   listPublic(tx?: ITransactionContext): Promise<Project[]>;
   listByOwner(ownerId: string, tx?: ITransactionContext): Promise<Project[]>;
   listForUser(userId: string, tx?: ITransactionContext): Promise<Project[]>;
@@ -129,6 +132,8 @@ export interface IProjectRepository {
 }
 
 export interface IMembershipRepository {
+  getTeams(tx?: ITransactionContext): Promise<Team[]>;
+  createTeam(team: Team, tx?: ITransactionContext): Promise<Team>;
   getProjectMembers(projectId: string, tx?: ITransactionContext): Promise<ProjectMember[]>;
   addProjectMember(member: ProjectMember, tx?: ITransactionContext): Promise<ProjectMember>;
   removeProjectMember(projectId: string, userId: string, tx?: ITransactionContext): Promise<boolean>;
@@ -149,17 +154,21 @@ export interface IMaterialRepository {
   listByProject(projectId: string, tx?: ITransactionContext): Promise<Material[]>;
   create(material: Material, tx?: ITransactionContext): Promise<Material>;
   update(id: string, updates: Partial<Material>, tx?: ITransactionContext): Promise<Material>;
+  linkToProject(materialId: string, projectId: string, tx?: ITransactionContext): Promise<Material | null>;
   delete(id: string, tx?: ITransactionContext): Promise<boolean>;
   getCollections(tx?: ITransactionContext): Promise<MaterialCollection[]>;
   getReadingProgress(userId: string, materialId: string, tx?: ITransactionContext): Promise<ReadingProgress | null>;
   saveReadingProgress(progress: ReadingProgress, tx?: ITransactionContext): Promise<ReadingProgress>;
   getBookmarks(userId: string, materialId?: string, tx?: ITransactionContext): Promise<Bookmark[]>;
+  getAllBookmarks(materialId?: string, tx?: ITransactionContext): Promise<Bookmark[]>;
   saveBookmark(bookmark: Bookmark, tx?: ITransactionContext): Promise<Bookmark>;
   deleteBookmark(id: string, tx?: ITransactionContext): Promise<boolean>;
   getHighlights(userId: string, materialId?: string, tx?: ITransactionContext): Promise<Highlight[]>;
+  getAllHighlights(materialId?: string, tx?: ITransactionContext): Promise<Highlight[]>;
   saveHighlight(highlight: Highlight, tx?: ITransactionContext): Promise<Highlight>;
   deleteHighlight(id: string, tx?: ITransactionContext): Promise<boolean>;
   getNotes(userId: string, materialId?: string, projectId?: string, tx?: ITransactionContext): Promise<Note[]>;
+  getAllNotes(tx?: ITransactionContext): Promise<Note[]>;
   saveNote(note: Note, tx?: ITransactionContext): Promise<Note>;
   deleteNote(id: string, tx?: ITransactionContext): Promise<boolean>;
 }
@@ -170,6 +179,7 @@ export interface IMaterialRepository {
 
 export interface IDatasetRepository {
   findById(id: string, tx?: ITransactionContext): Promise<Dataset | null>;
+  listAll(tx?: ITransactionContext): Promise<Dataset[]>;
   listByProject(projectId: string, tx?: ITransactionContext): Promise<Dataset[]>;
   create(dataset: Dataset, tx?: ITransactionContext): Promise<Dataset>;
   update(id: string, updates: Partial<Dataset>, tx?: ITransactionContext): Promise<Dataset>;
@@ -188,14 +198,19 @@ export interface IScientificRegistryRepository {
   getUnitById(id: string, tx?: ITransactionContext): Promise<ScientificUnit | null>;
   getVariables(tx?: ITransactionContext): Promise<ScientificVariable[]>;
   getVariableById(id: string, tx?: ITransactionContext): Promise<ScientificVariable | null>;
+  createVariable(variable: ScientificVariable, tx?: ITransactionContext): Promise<ScientificVariable>;
   getParameters(tx?: ITransactionContext): Promise<ScientificParameter[]>;
   getParameterById(id: string, tx?: ITransactionContext): Promise<ScientificParameter | null>;
+  createParameter(parameter: ScientificParameter, tx?: ITransactionContext): Promise<ScientificParameter>;
   getFormulas(tx?: ITransactionContext): Promise<ScientificFormula[]>;
   getFormulaById(id: string, tx?: ITransactionContext): Promise<ScientificFormula | null>;
+  createFormula(formula: ScientificFormula, tx?: ITransactionContext): Promise<ScientificFormula>;
   getModels(tx?: ITransactionContext): Promise<ScientificModel[]>;
   getModelById(id: string, tx?: ITransactionContext): Promise<ScientificModel | null>;
+  createModel(model: ScientificModel, tx?: ITransactionContext): Promise<ScientificModel>;
   getReferences(tx?: ITransactionContext): Promise<ScientificReference[]>;
   getReferenceById(id: string, tx?: ITransactionContext): Promise<ScientificReference | null>;
+  createReference(reference: ScientificReference, tx?: ITransactionContext): Promise<ScientificReference>;
   getInterpretationRules(tx?: ITransactionContext): Promise<InterpretationRule[]>;
   getInterpretationRuleById(id: string, tx?: ITransactionContext): Promise<InterpretationRule | null>;
   getAlgorithms(tx?: ITransactionContext): Promise<ScientificAlgorithm[]>;
@@ -207,6 +222,14 @@ export interface IScientificRegistryRepository {
 // ============================================================================
 
 export interface IResearchArtifactRepository {
+  getAllAnalyses(tx?: ITransactionContext): Promise<StatisticsAnalysis[]>;
+  getAllCharts(tx?: ITransactionContext): Promise<ChartRecord[]>;
+  getAllNotebooks(tx?: ITransactionContext): Promise<NutriNotebook[]>;
+  getAllExperiments(tx?: ITransactionContext): Promise<Experiment[]>;
+  getAllCodeExecutions(tx?: ITransactionContext): Promise<CodeExecutionRecord[]>;
+  getAllProvenanceRecords(tx?: ITransactionContext): Promise<ProvenanceRecord[]>;
+  getNotebookCells(notebookId: string, tx?: ITransactionContext): Promise<NotebookCell[]>;
+  findNotebookCellById(cellId: string, tx?: ITransactionContext): Promise<NotebookCell | null>;
   getAnalysesByProject(projectId: string, tx?: ITransactionContext): Promise<StatisticsAnalysis[]>;
   getAnalysisById(id: string, tx?: ITransactionContext): Promise<StatisticsAnalysis | null>;
   createAnalysis(analysis: StatisticsAnalysis, tx?: ITransactionContext): Promise<StatisticsAnalysis>;

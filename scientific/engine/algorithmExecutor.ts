@@ -33,7 +33,7 @@ import {
 import { InputValidator } from '../validator/inputValidator';
 import { CalculationEngine } from './calculationEngine';
 import { ModuleResolver, ResolvableModule } from '../resolvers/moduleResolver';
-import crypto from 'crypto';
+import { sha256Hex } from '../crypto';
 
 export interface ExecuteAlgorithmOptions {
   algorithm: ScientificAlgorithm;
@@ -370,7 +370,7 @@ export class AlgorithmExecutor {
 
     // Provenance Hash
     const provenancePayload = `${algorithm.algorithm_id}:${algorithm.version}:${JSON.stringify(ctx.normalized_inputs)}:${JSON.stringify(ctx.execution_path)}:${JSON.stringify(finalOutputs)}:${executionEndTime}`;
-    const provenance_id = crypto.createHash('sha256').update(provenancePayload).digest('hex');
+    const provenance_id = sha256Hex(provenancePayload);
 
     return {
       execution_id: `exec_alg_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,

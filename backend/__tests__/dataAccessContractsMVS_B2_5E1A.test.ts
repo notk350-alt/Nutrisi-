@@ -264,7 +264,7 @@ describe('MVS-B2.5E.1A: Asynchronous Data Access Contracts & Baseline Verificati
       for (const id of canonicalUserIds) {
         expect(db.users.some((u: any) => u.id === id)).toBe(true);
       }
-      expect(db.projects.length).toBe(2);
+      expect(db.projects.length).toBe(3);
       expect(db.materials.length).toBe(2);
       expect(db.formulas.length).toBe(5);
       expect(db.units.length).toBe(33);

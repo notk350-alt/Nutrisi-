@@ -9,7 +9,7 @@
  * Security: Pure deterministic AST evaluation. Zero eval(), zero new Function().
  */
 
-import crypto from 'crypto';
+import { sha256Hex } from '../crypto';
 import {
   ASTNode,
   ExecutionResult,
@@ -456,7 +456,7 @@ export class ModelExecutor {
       final_state: finalState,
       parameters: effectiveParams
     });
-    const provenance_id = crypto.createHash('sha256').update(provenancePayload).digest('hex');
+    const provenance_id = sha256Hex(provenancePayload);
 
     return {
       execution_id: `EXEC_MODEL_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,

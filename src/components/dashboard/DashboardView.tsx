@@ -1,9 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { User, UserRole } from '../../types';
 import { TabId } from '../layout/Sidebar';
-import { TreeOfLife3D } from './TreeOfLife3D';
 import { ORGAN_EDUCATION_DATA, OrganEducationItem } from '../../data/organEducationData';
-import { OrganEducationModal } from './OrganEducationModal';
 import { 
   FolderKanban, 
   BookOpen, 
@@ -29,6 +27,9 @@ import {
   ChevronRight,
   GraduationCap
 } from 'lucide-react';
+
+const TreeOfLife3D = React.lazy(() => import('./TreeOfLife3D').then(module => ({ default: module.TreeOfLife3D })));
+const OrganEducationModal = React.lazy(() => import('./OrganEducationModal').then(module => ({ default: module.OrganEducationModal })));
 
 interface DashboardViewProps {
   currentUser: User;
@@ -183,6 +184,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   stats,
 }) => {
   const [selectedOrganForEducation, setSelectedOrganForEducation] = useState<string | null>(null);
+  const [isTreeOfLifeOpen, setIsTreeOfLifeOpen] = useState(false);
 
   const quickActions: QuickActionItem[] = [
     {
@@ -277,10 +279,24 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
 
         {/* The 3D Canvas smoothly blending into the slate-950 background */}
-        <TreeOfLife3D 
-          onNavigate={onNavigate} 
-          onOpenOrganEducation={(organId) => setSelectedOrganForEducation(organId)}
-        />
+        {isTreeOfLifeOpen ? (
+          <React.Suspense fallback={<div className="min-h-[420px] grid place-items-center text-sm text-slate-400">Memuat visualisasi 3D...</div>}>
+            <TreeOfLife3D
+              onNavigate={onNavigate}
+              onOpenOrganEducation={(organId) => setSelectedOrganForEducation(organId)}
+            />
+          </React.Suspense>
+        ) : (
+          <div className="min-h-[420px] grid place-items-center rounded-xl border border-slate-800 bg-slate-900/40">
+            <button
+              type="button"
+              onClick={() => setIsTreeOfLifeOpen(true)}
+              className="border border-emerald-500/60 px-4 py-2 text-sm font-medium text-emerald-300 transition hover:bg-emerald-500/10"
+            >
+              Buka visualisasi 3D
+            </button>
+          </div>
+        )}
       </section>
 
       {/* 2. PUSAT PEMBELAJARAN CARA KERJA ORGAN TUBUH & FISIOLOGI (NEW EDUCATIONAL HUB) */}
@@ -494,12 +510,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       </div>
 
       {/* Comprehensive Organ Education Modal */}
-      <OrganEducationModal
-        organId={selectedOrganForEducation}
-        onClose={() => setSelectedOrganForEducation(null)}
-        onNavigate={onNavigate}
-        onSelectOrgan={(id) => setSelectedOrganForEducation(id)}
-      />
+      {selectedOrganForEducation && (
+        <React.Suspense fallback={null}>
+          <OrganEducationModal
+            organId={selectedOrganForEducation}
+            onClose={() => setSelectedOrganForEducation(null)}
+            onNavigate={onNavigate}
+            onSelectOrgan={(id) => setSelectedOrganForEducation(id)}
+          />
+        </React.Suspense>
+      )}
     </div>
   );
 };

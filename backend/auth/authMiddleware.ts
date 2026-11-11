@@ -11,8 +11,14 @@
  */
 
 import { Request, Response, NextFunction } from 'express';
-import { defaultSessionStore, ISessionStore } from './sessionStore';
-import { db } from '../database/store';
+import {
+  defaultSessionStore,
+  ISessionStore,
+  SessionValidationResult
+} from './sessionStore';
+import type { ISessionRepository, IDatabaseRepositories } from '../database/contracts';
+import type { DatabaseStore } from '../database/store';
+import { getRuntimeDb, getRuntimeSelection, resolveDatabaseProvider } from '../database/runtime';
 import { User } from '../database/types';
 
 // Augment Express Request
@@ -59,27 +65,71 @@ export function getCurrentUser(req: Request): User {
 /**
  * Middleware factory for authenticating session token against database and session store.
  */
-export function createAuthMiddleware(database = db, sessionStore: ISessionStore = defaultSessionStore) {
+type AuthDatabase = DatabaseStore | IDatabaseRepositories;
+type AuthSessionStore = ISessionStore | ISessionRepository;
+
+function isRepositoryDatabase(database: AuthDatabase): database is IDatabaseRepositories {
+  return 'users' in database && 'sessions' in database;
+}
+
+function findUser(database: AuthDatabase, userId: string): User | null | Promise<User | null> {
+  return isRepositoryDatabase(database)
+    ? database.users.findById(userId)
+    : database.getState().users.find((user) => user.id === userId) ?? null;
+}
+
+export function createAuthMiddleware(
+  database?: AuthDatabase,
+  sessionStore?: AuthSessionStore
+) {
+  const runtime = getRuntimeSelection();
+  if (resolveDatabaseProvider() === 'postgres') {
+    if (runtime?.provider !== 'postgres') {
+      throw new Error('PostgreSQL runtime must be initialized before creating authentication middleware.');
+    }
+    if (database && database !== runtime.repositories) {
+      throw new Error('Authentication middleware must use the initialized PostgreSQL repositories.');
+    }
+    if (sessionStore && sessionStore !== runtime.repositories.sessions) {
+      throw new Error('Authentication middleware must use the initialized PostgreSQL session repository.');
+    }
+  }
+  const selectedDatabase = database ?? (
+    runtime?.provider === 'postgres' ? runtime.repositories : getRuntimeDb()
+  );
+  const selectedSessionStore = sessionStore ?? (
+    runtime?.provider === 'postgres' ? runtime.repositories.sessions : defaultSessionStore
+  );
+
   return {
     /**
      * Optional session resolution middleware: populates req.user if a valid token is provided.
      */
-    authenticate(req: Request, res: Response, next: NextFunction) {
+    async authenticate(req: Request, res: Response, next: NextFunction) {
       const token = extractToken(req);
       if (!token) {
         req.user = undefined;
         return next();
       }
 
-      const validation = sessionStore.validateSession(token);
+      let validation: SessionValidationResult;
+      try {
+        validation = await selectedSessionStore.validateSession(token);
+      } catch (error) {
+        return next(error);
+      }
       if (!validation.valid || !validation.userId) {
         req.user = undefined;
         (req as any).authError = validation.error;
         return next();
       }
 
-      const state = database.getState();
-      const user = state.users.find((u: User) => u.id === validation.userId);
+      let user: User | null;
+      try {
+        user = await findUser(selectedDatabase, validation.userId);
+      } catch (error) {
+        return next(error);
+      }
       if (!user) {
         req.user = undefined;
         (req as any).authError = 'User associated with session not found';
@@ -121,7 +171,7 @@ export function createAuthMiddleware(database = db, sessionStore: ISessionStore 
      * Returns HTTP 401 if missing, expired, revoked, or invalid.
      * Returns HTTP 403 if account is suspended or disabled.
      */
-    requireAuth(req: Request, res: Response, next: NextFunction) {
+    async requireAuth(req: Request, res: Response, next: NextFunction) {
       const token = extractToken(req);
       if (!token) {
         return res.status(401).json({
@@ -130,7 +180,12 @@ export function createAuthMiddleware(database = db, sessionStore: ISessionStore 
         });
       }
 
-      const validation = sessionStore.validateSession(token);
+      let validation: SessionValidationResult;
+      try {
+        validation = await selectedSessionStore.validateSession(token);
+      } catch (error) {
+        return next(error);
+      }
       if (!validation.valid || !validation.userId) {
         return res.status(401).json({
           error: `Authentication failed: ${validation.error || 'Invalid session'}.`,
@@ -138,8 +193,12 @@ export function createAuthMiddleware(database = db, sessionStore: ISessionStore 
         });
       }
 
-      const state = database.getState();
-      const user = state.users.find((u: User) => u.id === validation.userId);
+      let user: User | null;
+      try {
+        user = await findUser(selectedDatabase, validation.userId);
+      } catch (error) {
+        return next(error);
+      }
       if (!user) {
         return res.status(401).json({
           error: 'User associated with session token does not exist in registry.',

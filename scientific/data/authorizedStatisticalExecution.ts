@@ -16,7 +16,7 @@
  * 8. Zero eval(), zero new Function().
  */
 
-import * as crypto from 'crypto';
+import { sha256Hex } from '../crypto';
 import {
   DataArtifact,
   DatasetVersion,
@@ -160,7 +160,7 @@ export function computeStatisticalExecutionRequestHash(
     parameter_set_id: req.parameter_set_id || null,
     parameter_snapshot: req.parameter_snapshot || null
   };
-  return crypto.createHash('sha256').update(canonicalizeJson(normalized), 'utf8').digest('hex');
+  return sha256Hex(canonicalizeJson(normalized));
 }
 
 /**

@@ -10,26 +10,49 @@
  * 3. Anti-Auto-Merge: DILARANG KERAS menggabungkan akun lokal secara otomatis berdasarkan kesamaan email (fails closed with IDENTITY_CONFLICT).
  * 4. Least-Privilege Role: Akun baru selalu dan hanya memperoleh role 'RegisteredUser' dengan permission default [].
  * 5. Inactive Account Containment: Akun berstatus SUSPENDED atau DISABLED langsung menghasilkan ACCOUNT_INACTIVE.
- * 6. Concurrency & Idempotency: Keyed async locking per sub & per email prevents duplicate race-condition provisioning within single process.
+ * 6. Concurrency & Idempotency: Repository provisioning relies on transactional unique constraints; legacy JSON tests retain keyed locks.
  * 7. Zero Credential Exposure: Tidak pernah mengembalikan token, client secret, nonce, atau PKCE verifier.
  * 8. Session Boundary: Tidak membuat sesi atau cookie pengguna.
  */
 
-import { VerifiedOIDCIdentity, IdentityProvisioningOutcome, ProvisionGoogleIdentityOptions, ProvisionGoogleIdentityResult } from './types';
-import { DatabaseStore, db } from '../../database/store';
+import { VerifiedOIDCIdentity, ProvisionGoogleIdentityOptions, ProvisionGoogleIdentityResult } from './types';
+import type { DatabaseStore } from '../../database/store';
+import type { IDatabaseRepositories } from '../../database/contracts';
+import { getRuntimeDb, getRuntimeRepositories, getRuntimeSelection, resolveDatabaseProvider } from '../../database/runtime';
 import { User, ExternalIdentity } from '../../database/types';
+import crypto from 'crypto';
 
 export class GoogleIdentityProvisioningService {
-  private database: DatabaseStore;
+  private readonly database?: DatabaseStore | IDatabaseRepositories;
   private locks: Map<string, Promise<void>> = new Map();
 
-  constructor(database: DatabaseStore = db) {
+  constructor(database?: DatabaseStore | IDatabaseRepositories) {
     this.database = database;
   }
 
+  private get repositories(): IDatabaseRepositories | undefined {
+    const runtime = getRuntimeSelection();
+    if (resolveDatabaseProvider() === 'postgres') {
+      if (runtime?.provider !== 'postgres') {
+        throw new Error('PostgreSQL runtime must be initialized before OIDC provisioning.');
+      }
+      if (this.database && this.database !== runtime.repositories) {
+        throw new Error('OIDC provisioning must use the initialized PostgreSQL repositories.');
+      }
+      return getRuntimeRepositories();
+    }
+    if (this.database && 'unitOfWork' in this.database) return this.database;
+    return undefined;
+  }
+
+  private get store(): DatabaseStore {
+    if (this.database && !('unitOfWork' in this.database)) return this.database;
+    return getRuntimeDb();
+  }
+
   /**
-   * Internal mutex to serialize operations sharing the same Google sub or email
-   * within this process, eliminating concurrent race-condition duplicates.
+   * Legacy JSON-store serialization. Repository-backed provisioning relies on
+   * transactional unique constraints instead of this process-local lock.
    */
   private async withKeyedLock<T>(keys: string[], action: () => Promise<T>): Promise<T> {
     while (keys.some(k => this.locks.has(k))) {
@@ -108,19 +131,24 @@ export class GoogleIdentityProvisioningService {
     const trimmedSub = identity.sub.trim();
     const normalizedEmail = identity.email!.trim().toLowerCase();
 
+    const repositories = this.repositories;
+    if (repositories) {
+      return this.provisionWithRepositories(repositories, identity, trimmedSub, normalizedEmail, options);
+    }
+
     const subLockKey = `sub:${trimmedSub}`;
     const emailLockKey = `email:${normalizedEmail}`;
 
     // 2. Concurrency Serialization
     return this.withKeyedLock([subLockKey, emailLockKey], async () => {
       // 3. Search for Existing External Identity
-      const existingIdentity = this.database.findExternalIdentity('google', trimmedSub);
+      const existingIdentity = this.store.findExternalIdentity('google', trimmedSub);
 
       if (existingIdentity) {
-        const user = this.database.getUserById(existingIdentity.user_id);
+        const user = this.store.getUserById(existingIdentity.user_id);
 
         if (!user) {
-          this.database.logAudit(
+          this.store.logAudit(
             'SYSTEM',
             'OIDC_IDENTITY_CONFLICT',
             'EXTERNAL_IDENTITY',
@@ -138,7 +166,7 @@ export class GoogleIdentityProvisioningService {
 
         // Account status check
         if (user.account_status && user.account_status !== 'ACTIVE') {
-          this.database.logAudit(
+          this.store.logAudit(
             user.id,
             'OIDC_INACTIVE_ACCESS_ATTEMPT',
             'USER',
@@ -158,7 +186,7 @@ export class GoogleIdentityProvisioningService {
 
         // Maintain claim anomaly audit if Google email changed, but NEVER alter local user primary email
         if (existingIdentity.email && existingIdentity.email.toLowerCase() !== normalizedEmail) {
-          this.database.logAudit(
+          this.store.logAudit(
             user.id,
             'OIDC_CLAIM_ANOMALY',
             'USER',
@@ -167,7 +195,7 @@ export class GoogleIdentityProvisioningService {
             options?.ipAddress
           );
           existingIdentity.email = normalizedEmail;
-          this.database.save();
+          this.store.save();
         }
 
         return {
@@ -179,9 +207,9 @@ export class GoogleIdentityProvisioningService {
       }
 
       // 4. Check for Email Collision on Local Accounts (Anti-Auto-Merge Policy)
-      const conflictingUser = this.database.getUserByEmail(normalizedEmail);
+      const conflictingUser = this.store.getUserByEmail(normalizedEmail);
       if (conflictingUser) {
-        this.database.logAudit(
+        this.store.logAudit(
           conflictingUser.id,
           'OIDC_IDENTITY_CONFLICT',
           'USER',
@@ -200,7 +228,7 @@ export class GoogleIdentityProvisioningService {
 
       // 5. Transactional Provisioning of Unprivileged RegisteredUser
       try {
-        const provisionResult = this.database.provisionGoogleUser({
+        const provisionResult = this.store.provisionGoogleUser({
           identity: {
             provider: 'google',
             sub: trimmedSub,
@@ -221,7 +249,7 @@ export class GoogleIdentityProvisioningService {
         };
       } catch (provisionErr: any) {
         try {
-          this.database.logAudit(
+          this.store.logAudit(
             'SYSTEM',
             'OIDC_STORAGE_FAILURE',
             'USER',
@@ -240,6 +268,222 @@ export class GoogleIdentityProvisioningService {
         };
       }
     });
+  }
+
+  private async provisionWithRepositories(
+    repositories: IDatabaseRepositories,
+    identity: VerifiedOIDCIdentity,
+    trimmedSub: string,
+    normalizedEmail: string,
+    options?: ProvisionGoogleIdentityOptions
+  ): Promise<ProvisionGoogleIdentityResult> {
+    try {
+      return await repositories.unitOfWork.runInTransaction(async tx => {
+        const existingIdentity = await repositories.externalIdentities.findByProviderSubject('google', trimmedSub, tx);
+        if (existingIdentity) {
+          const user = await repositories.users.findById(existingIdentity.user_id, tx);
+          if (!user) {
+            const details = `Dangling Google external identity found for sub '${trimmedSub}': user '${existingIdentity.user_id}' does not exist in registry.`;
+            const auditLog = await repositories.auditLogs.appendLog({
+              user_id: 'SYSTEM',
+              user_name: 'SYSTEM',
+              action: 'OIDC_IDENTITY_CONFLICT',
+              entity_type: 'EXTERNAL_IDENTITY',
+              entity_id: trimmedSub,
+              details,
+              ip_address: options?.ipAddress
+            }, tx);
+            return {
+              outcome: 'IDENTITY_CONFLICT',
+              success: false,
+              error: `Integrity anomaly: External identity (google, ${trimmedSub}) references non-existent user '${existingIdentity.user_id}'.`,
+              auditLog
+            };
+          }
+
+          if (user.account_status && user.account_status !== 'ACTIVE') {
+            const auditLog = await repositories.auditLogs.appendLog({
+              user_id: user.id,
+              user_name: user.name,
+              action: 'OIDC_INACTIVE_ACCESS_ATTEMPT',
+              entity_type: 'USER',
+              entity_id: user.id,
+              details: `OIDC login attempt for Google sub '${trimmedSub}' rejected because account is ${user.account_status}.`,
+              ip_address: options?.ipAddress
+            }, tx);
+            return {
+              outcome: 'ACCOUNT_INACTIVE',
+              success: false,
+              user,
+              externalIdentity: existingIdentity,
+              auditLog,
+              error: `User account '${user.id}' is ${user.account_status}. Access is forbidden.`
+            };
+          }
+
+          if (existingIdentity.email && existingIdentity.email.toLowerCase() !== normalizedEmail) {
+            const auditLog = await repositories.auditLogs.appendLog({
+              user_id: user.id,
+              user_name: user.name,
+              action: 'OIDC_CLAIM_ANOMALY',
+              entity_type: 'USER',
+              entity_id: user.id,
+              details: `Google email claim changed from '${existingIdentity.email}' to '${normalizedEmail}' for sub '${trimmedSub}'. Primary user email preserved.`,
+              ip_address: options?.ipAddress
+            }, tx);
+            const updatedIdentity: ExternalIdentity = { ...existingIdentity, email: normalizedEmail };
+            await repositories.externalIdentities.unlinkIdentity('google', trimmedSub, tx);
+            await repositories.externalIdentities.linkIdentity(updatedIdentity, tx);
+            return {
+              outcome: 'EXISTING_LINKED_ACCOUNT',
+              success: true,
+              user,
+              externalIdentity: updatedIdentity,
+              auditLog
+            };
+          }
+
+          return { outcome: 'EXISTING_LINKED_ACCOUNT', success: true, user, externalIdentity: existingIdentity };
+        }
+
+        const conflictingUser = await repositories.users.findByEmail(normalizedEmail, tx);
+        if (conflictingUser) {
+          const details = `Google OIDC login attempt for email '${normalizedEmail}' conflicted with existing local account '${conflictingUser.id}'. Auto-merge blocked. Explicit linking required.`;
+          const auditLog = await repositories.auditLogs.appendLog({
+            user_id: conflictingUser.id,
+            user_name: conflictingUser.name,
+            action: 'OIDC_IDENTITY_CONFLICT',
+            entity_type: 'USER',
+            entity_id: conflictingUser.id,
+            details,
+            ip_address: options?.ipAddress
+          }, tx);
+          return {
+            outcome: 'IDENTITY_CONFLICT',
+            success: false,
+            conflictingUserId: conflictingUser.id,
+            auditLog,
+            error: `Identity conflict: Email '${normalizedEmail}' matches an existing local account. Auto-merge is strictly prohibited. Explicit account linking required.`
+          };
+        }
+
+        const rawName = identity.profile?.name?.trim() ||
+          [identity.profile?.givenName, identity.profile?.familyName].filter(Boolean).join(' ').trim() ||
+          normalizedEmail.split('@')[0] || 'Google User';
+        const sanitizedName = rawName.replace(/<[^>]*>/g, '').replace(/[\x00-\x1F\x7F]/g, '').trim().substring(0, 100);
+        const picture = identity.profile?.picture?.trim();
+        const now = options?.currentTime ? new Date(options.currentTime).toISOString() : new Date().toISOString();
+        const userId = `usr_google_${crypto.randomBytes(8).toString('hex')}`;
+        const user: User = {
+          id: userId,
+          user_id: userId,
+          email: normalizedEmail,
+          name: sanitizedName,
+          display_name: sanitizedName,
+          role: 'RegisteredUser',
+          permissions: [],
+          avatar_url: picture?.startsWith('https://') ? picture.substring(0, 500) : undefined,
+          created_at: now,
+          updated_at: now,
+          last_login_at: now,
+          account_status: 'ACTIVE',
+          email_verified: true,
+          provider: 'google',
+          provider_subject_id: trimmedSub,
+          token_version: 1
+        };
+        const externalIdentity: ExternalIdentity = {
+          provider: 'google',
+          provider_subject_id: trimmedSub,
+          user_id: userId,
+          email: normalizedEmail,
+          email_verified: true,
+          linked_at: now
+        };
+        const createdUser = await repositories.users.create(user, tx);
+        await repositories.externalIdentities.linkIdentity(externalIdentity, tx);
+        const auditLog = await repositories.auditLogs.appendLog({
+          user_id: userId,
+          user_name: sanitizedName,
+          action: 'OIDC_ACCOUNT_PROVISION',
+          entity_type: 'USER',
+          entity_id: userId,
+          details: `New account provisioned via Google OIDC for ${sanitizedName} (${normalizedEmail}) with unprivileged role RegisteredUser.`,
+          ip_address: options?.ipAddress,
+          timestamp: now
+        }, tx);
+        return {
+          outcome: 'PROVISIONED_NEW_ACCOUNT',
+          success: true,
+          user: createdUser,
+          externalIdentity,
+          auditLog
+        };
+      });
+    } catch (provisionErr: any) {
+      try {
+        const linkedIdentity = await repositories.externalIdentities.findByProviderSubject('google', trimmedSub);
+        if (linkedIdentity) {
+          const user = await repositories.users.findById(linkedIdentity.user_id);
+          if (user) {
+            if (user.account_status && user.account_status !== 'ACTIVE') {
+              return {
+                outcome: 'ACCOUNT_INACTIVE',
+                success: false,
+                user,
+                externalIdentity: linkedIdentity,
+                error: `User account '${user.id}' is ${user.account_status}. Access is forbidden.`
+              };
+            }
+            return { outcome: 'EXISTING_LINKED_ACCOUNT', success: true, user, externalIdentity: linkedIdentity };
+          }
+        }
+
+        const conflictingUser = await repositories.users.findByEmail(normalizedEmail);
+        if (conflictingUser) {
+          await repositories.unitOfWork.runInTransaction(async tx => {
+            await repositories.auditLogs.appendLog({
+              user_id: conflictingUser.id,
+              user_name: conflictingUser.name,
+              action: 'OIDC_IDENTITY_CONFLICT',
+              entity_type: 'USER',
+              entity_id: conflictingUser.id,
+              details: `Google OIDC login attempt for email '${normalizedEmail}' conflicted with existing local account '${conflictingUser.id}'. Auto-merge blocked. Explicit linking required.`,
+              ip_address: options?.ipAddress
+            }, tx);
+          });
+          return {
+            outcome: 'IDENTITY_CONFLICT',
+            success: false,
+            conflictingUserId: conflictingUser.id,
+            error: `Identity conflict: Email '${normalizedEmail}' matches an existing local account. Auto-merge is strictly prohibited. Explicit account linking required.`
+          };
+        }
+      } catch {
+        // A failed transaction cannot be treated as a successful identity resolution.
+      }
+
+      try {
+        await repositories.unitOfWork.runInTransaction(async tx => {
+          await repositories.auditLogs.appendLog({
+            user_id: 'SYSTEM',
+            user_name: 'SYSTEM',
+            action: 'OIDC_STORAGE_FAILURE',
+            entity_type: 'USER',
+            entity_id: 'UNKNOWN',
+            details: `Failed to provision Google account for sub '${trimmedSub}' (${normalizedEmail}): ${provisionErr?.message || 'Storage error'}.`,
+            ip_address: options?.ipAddress
+          }, tx);
+        });
+      } catch {
+        // Fail closed when the repository is unavailable.
+      }
+      return {
+        outcome: 'PROVISIONING_STORAGE_FAILURE',
+        success: false,
+        error: `Provisioning storage failure: ${provisionErr?.message || 'Internal store error'}`
+      };
+    }
   }
 }
 

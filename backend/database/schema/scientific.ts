@@ -22,8 +22,10 @@ import {
   timestamp,
   jsonb,
   primaryKey,
-  index
+  index,
+  check
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import type {
   ASTNode,
   FormulaInputSpec,
@@ -33,7 +35,9 @@ import type {
   InterpretationThreshold,
   ModelStateVariable,
   ModelTimeConfig,
-  ModelTransitionDefinition
+  ModelTransitionDefinition,
+  DataType,
+  RegistryStatus
 } from '../../../scientific';
 
 // ============================================================================
@@ -75,6 +79,7 @@ export const scientificReferences = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
   },
   (table) => [
+    check('scientific_references_year_check', sql`${table.year} >= 1800 AND ${table.year} <= 2100`),
     index('idx_scientific_references_year').on(table.year),
     index('idx_scientific_references_citation_key').on(table.citationKey)
   ]
@@ -90,8 +95,10 @@ export const scientificVariables = pgTable(
     name: varchar('name', { length: 128 }).notNull(),
     label: varchar('label', { length: 128 }).notNull(),
     definition: text('definition'),
-    datatype: varchar('datatype', { length: 32 }).notNull(),
-    unit: varchar('unit', { length: 32 }).notNull(), // References scientific_units(symbol)
+    datatype: varchar('datatype', { length: 32 }).$type<DataType>().notNull(),
+    unit: varchar('unit', { length: 32 })
+      .notNull()
+      .references(() => scientificUnits.symbol, { onDelete: 'restrict' }),
     measurementType: varchar('measurement_type', { length: 64 }).notNull(),
     allowedRange: jsonb('allowed_range').$type<{
       min?: number;
@@ -105,11 +112,19 @@ export const scientificVariables = pgTable(
       { onDelete: 'set null' }
     ),
     version: varchar('version', { length: 32 }).notNull().default('1.0.0'),
-    status: varchar('status', { length: 32 }).notNull().default('EXPERIMENTAL'),
+    status: varchar('status', { length: 32 }).$type<RegistryStatus>().notNull().default('EXPERIMENTAL'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
   },
   (table) => [
+    check(
+      'scientific_variables_datatype_check',
+      sql`${table.datatype} IN ('number', 'integer', 'boolean', 'string', 'vector', 'matrix')`
+    ),
+    check(
+      'scientific_variables_status_check',
+      sql`${table.status} IN ('DRAFT', 'UNDER_REVIEW', 'VALIDATED', 'VALIDATION', 'VERIFIED', 'EXPERIMENTAL', 'DEPRECATED')`
+    ),
     index('idx_variables_measurement_type').on(table.measurementType),
     index('idx_variables_status').on(table.status)
   ]
@@ -125,15 +140,21 @@ export const scientificParameters = pgTable(
     name: varchar('name', { length: 128 }).notNull(),
     description: text('description'),
     value: jsonb('value').notNull(), // scalar number | string | boolean | number[]
-    unit: varchar('unit', { length: 32 }).notNull(),
+    unit: varchar('unit', { length: 32 })
+      .notNull()
+      .references(() => scientificUnits.symbol, { onDelete: 'restrict' }),
     validRange: jsonb('valid_range').$type<{ min?: number; max?: number }>(),
     version: varchar('version', { length: 32 }).notNull().default('1.0.0'),
-    status: varchar('status', { length: 32 }).notNull().default('EXPERIMENTAL'),
+    status: varchar('status', { length: 32 }).$type<RegistryStatus>().notNull().default('EXPERIMENTAL'),
     isConstant: boolean('is_constant').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
   },
   (table) => [
+    check(
+      'scientific_parameters_status_check',
+      sql`${table.status} IN ('DRAFT', 'UNDER_REVIEW', 'VALIDATED', 'VALIDATION', 'VERIFIED', 'EXPERIMENTAL', 'DEPRECATED')`
+    ),
     index('idx_parameters_status').on(table.status)
   ]
 );
@@ -166,7 +187,7 @@ export const scientificFormulas = pgTable(
     name: varchar('name', { length: 128 }).notNull(),
     description: text('description'),
     version: varchar('version', { length: 32 }).notNull().default('1.0.0'),
-    status: varchar('status', { length: 32 }).notNull().default('EXPERIMENTAL'),
+    status: varchar('status', { length: 32 }).$type<RegistryStatus>().notNull().default('EXPERIMENTAL'),
     inputs: jsonb('inputs').$type<FormulaInputSpec[]>().notNull().default([]),
     outputs: jsonb('outputs').$type<FormulaOutputSpec[]>().notNull().default([]),
     expressionAst: jsonb('expression_ast').$type<ASTNode>().notNull(),
@@ -179,6 +200,10 @@ export const scientificFormulas = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
   },
   (table) => [
+    check(
+      'scientific_formulas_status_check',
+      sql`${table.status} IN ('DRAFT', 'UNDER_REVIEW', 'VALIDATED', 'VALIDATION', 'VERIFIED', 'EXPERIMENTAL', 'DEPRECATED')`
+    ),
     index('idx_formulas_status').on(table.status),
     index('idx_formulas_validation_status').on(table.validationStatus)
   ]
@@ -228,7 +253,7 @@ export const scientificAlgorithms = pgTable(
     name: varchar('name', { length: 128 }).notNull(),
     description: text('description'),
     version: varchar('version', { length: 32 }).notNull().default('1.0.0'),
-    status: varchar('status', { length: 32 }).notNull().default('EXPERIMENTAL'),
+    status: varchar('status', { length: 32 }).$type<RegistryStatus>().notNull().default('EXPERIMENTAL'),
     inputs: jsonb('inputs').$type<FormulaInputSpec[]>().notNull().default([]),
     outputs: jsonb('outputs').$type<FormulaOutputSpec[]>().notNull().default([]),
     entryStepId: varchar('entry_step_id', { length: 64 }),
@@ -240,7 +265,13 @@ export const scientificAlgorithms = pgTable(
     createdBy: varchar('created_by', { length: 64 }).notNull().default('SYSTEM'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
-  }
+  },
+  (table) => [
+    check(
+      'scientific_algorithms_status_check',
+      sql`${table.status} IN ('DRAFT', 'UNDER_REVIEW', 'VALIDATED', 'VALIDATION', 'VERIFIED', 'EXPERIMENTAL', 'DEPRECATED')`
+    )
+  ]
 );
 
 // Junction: Algorithm to Parameters (M:N)
@@ -287,7 +318,7 @@ export const scientificModels = pgTable(
     name: varchar('name', { length: 128 }).notNull(),
     description: text('description'),
     version: varchar('version', { length: 32 }).notNull().default('1.0.0'),
-    status: varchar('status', { length: 32 }).notNull().default('EXPERIMENTAL'),
+    status: varchar('status', { length: 32 }).$type<RegistryStatus>().notNull().default('EXPERIMENTAL'),
     isVerified: boolean('is_verified').notNull().default(false),
     parentModelId: varchar('parent_model_id', { length: 64 }),
     assumptions: jsonb('assumptions').$type<string[]>().notNull().default([]),
@@ -296,13 +327,17 @@ export const scientificModels = pgTable(
     inputs: jsonb('inputs').$type<FormulaInputSpec[]>().default([]),
     outputs: jsonb('outputs').$type<FormulaOutputSpec[]>().default([]),
     states: jsonb('states').$type<ModelStateVariable[]>().default([]),
-    timeConfig: jsonb('time_config').$type<ModelTimeConfig>(),
+    timeConfig: jsonb('time_config').$type<ModelTimeConfig>().default(sql`'{}'::jsonb`),
     transitions: jsonb('transitions').$type<ModelTransitionDefinition[]>().default([]),
     createdBy: varchar('created_by', { length: 64 }).notNull().default('SYSTEM'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
   },
   (table) => [
+    check(
+      'scientific_models_status_check',
+      sql`${table.status} IN ('DRAFT', 'UNDER_REVIEW', 'VALIDATED', 'VALIDATION', 'VERIFIED', 'EXPERIMENTAL', 'DEPRECATED')`
+    ),
     index('idx_models_status').on(table.status)
   ]
 );
@@ -399,7 +434,7 @@ export const scientificInterpretationRules = pgTable(
     name: varchar('name', { length: 128 }).notNull(),
     description: text('description'),
     version: varchar('version', { length: 32 }).notNull().default('1.0.0'),
-    status: varchar('status', { length: 32 }).notNull().default('VERIFIED'),
+    status: varchar('status', { length: 32 }).$type<RegistryStatus>().notNull().default('VERIFIED'),
     targetVariableOrMetric: varchar('target_variable_or_metric', { length: 64 }).notNull(),
     unit: varchar('unit', { length: 32 }).notNull(),
     population: varchar('population', { length: 128 }),
@@ -409,6 +444,10 @@ export const scientificInterpretationRules = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
   },
   (table) => [
+    check(
+      'scientific_interpretation_rules_status_check',
+      sql`${table.status} IN ('DRAFT', 'UNDER_REVIEW', 'VALIDATED', 'VALIDATION', 'VERIFIED', 'EXPERIMENTAL', 'DEPRECATED')`
+    ),
     index('idx_interpretation_rules_target').on(table.targetVariableOrMetric)
   ]
 );
